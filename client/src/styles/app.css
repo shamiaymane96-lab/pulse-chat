@@ -566,6 +566,48 @@ code {
   display: flex;
   gap: 0.35rem;
   flex-shrink: 0;
+  align-items: center;
+}
+
+.header-menu-wrap {
+  position: relative;
+}
+
+.header-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  z-index: 20;
+}
+
+.header-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.35rem);
+  z-index: 21;
+  min-width: 10.5rem;
+  display: grid;
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.header-menu button {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 0.7rem 0.9rem;
+  cursor: pointer;
+}
+
+.header-menu button:hover {
+  background: var(--bg-soft);
 }
 
 .waiting-card {

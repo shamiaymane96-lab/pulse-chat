@@ -2,8 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { JoinScreen } from './components/JoinScreen'
 import { ChatView } from './components/ChatView'
-import { registerPushSubscription } from './lib/push'
-import { isSupabaseConfigured, supabase } from './lib/supabase'
+import { isSupabaseConfigured } from './lib/supabase'
 import './styles/app.css'
 
 function Shell() {
@@ -31,21 +30,6 @@ function Shell() {
       window.removeEventListener('resize', apply)
     }
   }, [])
-
-  useEffect(() => {
-    if (!user) return
-    void registerPushSubscription(user.id, async (payload) => {
-      await supabase.from('push_subscriptions').upsert(
-        {
-          user_id: user.id,
-          endpoint: payload.endpoint,
-          p256dh: payload.p256dh,
-          auth: payload.auth,
-        },
-        { onConflict: 'endpoint' },
-      )
-    })
-  }, [user])
 
   const onActivity = useCallback(() => {
     // reserved for future unread sync

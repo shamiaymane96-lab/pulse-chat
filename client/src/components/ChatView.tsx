@@ -95,6 +95,14 @@ function mergeServerWithLocals(server: Message[], locals: Message[]) {
   return [...server, ...unique].sort((a, b) => a.created_at.localeCompare(b.created_at))
 }
 
+function revokeBlobUrlsFromMessages(msgs: Message[]) {
+  for (const m of msgs) {
+    for (const a of m.attachments ?? []) {
+      if (a.signed_url?.startsWith('blob:')) URL.revokeObjectURL(a.signed_url)
+    }
+  }
+}
+
 export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props) {
   const { user, setRoomCode } = useAuth()
   const [messages, setMessages] = useState<Message[]>([])
@@ -111,17 +119,31 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   const [replyTo, setReplyTo] = useState<Message | null>(null)
   const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null)
   const [menuFor, setMenuFor] = useState<string | null>(null)
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false)
   const [hiddenUnread, setHiddenUnread] = useState(0)
   const [online, setOnline] = useState(navigator.onLine)
+  const [rtEpoch, setRtEpoch] = useState(0)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const scrollerRef = useRef<HTMLDivElement>(null)
+  const stickToBottomRef = useRef(true)
   const channelRef = useRef<RealtimeChannel | null>(null)
+  const messagesRef = useRef<Message[]>([])
   const baseTitle = useRef(document.title)
   const flushing = useRef(false)
   const messageIdsRef = useRef<string[]>([])
+  const reconnectTimer = useRef<number | null>(null)
 
   useEffect(() => {
+    messagesRef.current = messages
     messageIdsRef.current = messages.map((m) => m.id).filter((id) => id.length > 20)
   }, [messages])
+
+  useEffect(() => {
+    return () => {
+      revokeBlobUrlsFromMessages(messagesRef.current)
+      if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current)
+    }
+  }, [])
 
   const waitingForPeer = peerCount < 2
   const isGroup = maxParticipants > 2
@@ -356,10 +378,13 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
       const [enriched] = await enrichMessages([inserted])
       removeOutbox(clientId)
       setMessages((prev) => {
+        const old = prev.find((m) => m.clientId === clientId)
+        if (old) revokeBlobUrlsFromMessages([old])
         const withoutLocal = prev.filter((m) => m.clientId !== clientId && m.id !== enriched.id)
         const next: Message = { ...enriched, clientId, localStatus: 'sent', localProgress: 100 }
         return [...withoutLocal, next].sort((a, b) => a.created_at.localeCompare(b.created_at))
       })
+      stickToBottomRef.current = true
       onActivity()
     },
     [conversationId, enrichMessages, onActivity, user],
@@ -405,6 +430,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
           : null,
       }
       upsertMessage(optimistic)
+      stickToBottomRef.current = true
 
       if (!navigator.onLine) {
         enqueueOutbox({
@@ -507,8 +533,15 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   }, [conversationId, enrichMessages, flushOutbox, markSeen, refreshParticipants, user])
 
   useEffect(() => {
+    if (!stickToBottomRef.current) return
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages.length, peerTyping, waitingForPeer])
+
+  function onScrollerScroll() {
+    const el = scrollerRef.current
+    if (!el) return
+    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96
+  }
 
   useEffect(() => {
     const onVis = () => {
@@ -665,15 +698,53 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
           await channel.track({ typing: false, online_at: new Date().toISOString() })
+          // Catch up after reconnect
+          void refreshParticipants()
+          void (async () => {
+            const { data: rows } = await supabase
+              .from('messages')
+              .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id, client_id')
+              .eq('conversation_id', conversationId)
+              .order('created_at', { ascending: true })
+              .limit(300)
+            if (!rows) return
+            const enriched = await enrichMessages(rows as Message[])
+            setMessages((prev) => {
+              const locals = prev.filter(
+                (m) => m.localStatus === 'pending' || m.localStatus === 'failed' || m.localStatus === 'uploading',
+              )
+              return mergeServerWithLocals(enriched, locals)
+            })
+            void markSeen()
+            void flushOutbox()
+          })()
+          return
+        }
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current)
+          reconnectTimer.current = window.setTimeout(() => {
+            setRtEpoch((n) => n + 1)
+          }, 2000)
         }
       })
 
     channelRef.current = channel
     return () => {
+      if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current)
       void supabase.removeChannel(channel)
       channelRef.current = null
     }
-  }, [conversationId, enrichMessages, markSeen, onActivity, refreshParticipants, upsertMessage, user])
+  }, [
+    conversationId,
+    enrichMessages,
+    flushOutbox,
+    markSeen,
+    onActivity,
+    refreshParticipants,
+    rtEpoch,
+    upsertMessage,
+    user,
+  ])
 
   async function setTyping(typing: boolean) {
     const channel = channelRef.current
@@ -699,7 +770,10 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
       return
     }
     clearOutboxForConversation(conversationId)
-    setMessages([])
+    setMessages((prev) => {
+      revokeBlobUrlsFromMessages(prev)
+      return []
+    })
   }
 
   async function regenerateCode() {
@@ -754,25 +828,65 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         </div>
         <div className="header-actions">
           {roomCode && (
-            <>
-              <button type="button" className="btn ghost icon-btn" onClick={() => void copyCode()}>
-                {copied ? 'Copied' : 'Copy'}
-              </button>
-              <button type="button" className="btn ghost icon-btn" onClick={() => void shareCode()}>
-                Share
-              </button>
-            </>
+            <button type="button" className="btn ghost icon-btn header-primary-action" onClick={() => void shareCode()}>
+              Share
+            </button>
           )}
-          <button type="button" className="btn ghost icon-btn" onClick={() => void clearChat()} title="Clear chat">
-            Clear
-          </button>
-          <button type="button" className="btn ghost icon-btn" onClick={() => void regenerateCode()} title="New code">
-            New
-          </button>
+          <div className="header-menu-wrap">
+            <button
+              type="button"
+              className="btn ghost icon-btn"
+              aria-expanded={headerMenuOpen}
+              aria-haspopup="menu"
+              onClick={() => setHeaderMenuOpen((o) => !o)}
+              title="More"
+            >
+              More
+            </button>
+            {headerMenuOpen && (
+              <>
+                <button type="button" className="header-menu-backdrop" aria-label="Close menu" onClick={() => setHeaderMenuOpen(false)} />
+                <div className="header-menu" role="menu">
+                  {roomCode && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setHeaderMenuOpen(false)
+                        void copyCode()
+                      }}
+                    >
+                      {copied ? 'Copied' : 'Copy code'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setHeaderMenuOpen(false)
+                      void clearChat()
+                    }}
+                  >
+                    Clear chat
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setHeaderMenuOpen(false)
+                      void regenerateCode()
+                    }}
+                  >
+                    New code
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </header>
 
-      <div className="message-scroller">
+      <div className="message-scroller" ref={scrollerRef} onScroll={onScrollerScroll}>
         {loading && <p className="muted pad">Loading messages…</p>}
         {error && <p className="error pad">{error}</p>}
 
@@ -804,7 +918,11 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
               m.body && !(audio && (m.body === 'Voice note' || m.body === audio.file_name))
             const grouped = new Map<string, number>()
             for (const r of m.reactions ?? []) grouped.set(r.emoji, (grouped.get(r.emoji) ?? 0) + 1)
-            const canAct = !m.clientId && m.localStatus !== 'pending' && m.localStatus !== 'uploading' && m.localStatus !== 'failed'
+            const canAct =
+              m.localStatus !== 'pending' &&
+              m.localStatus !== 'uploading' &&
+              m.localStatus !== 'failed' &&
+              !(m.clientId && m.id === m.clientId)
             const status = receiptLabel(m)
 
             return (
