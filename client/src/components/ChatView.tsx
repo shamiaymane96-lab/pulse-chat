@@ -897,17 +897,35 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
     }
   }, [hiddenUnread])
 
+  // Keep volatile callbacks out of the channel effect deps — recreating the
+  // channel on every callback identity change causes Reconnecting flicker.
+  const enrichMessagesRef = useRef(enrichMessages)
+  const flushOutboxRef = useRef(flushOutbox)
+  const markSeenRef = useRef(markSeen)
+  const onActivityRef = useRef(onActivity)
+  const refreshParticipantsRef = useRef(refreshParticipants)
+  const reloadFromServerRef = useRef(reloadFromServer)
+  const upsertMessageRef = useRef(upsertMessage)
+  enrichMessagesRef.current = enrichMessages
+  flushOutboxRef.current = flushOutbox
+  markSeenRef.current = markSeen
+  onActivityRef.current = onActivity
+  refreshParticipantsRef.current = refreshParticipants
+  reloadFromServerRef.current = reloadFromServer
+  upsertMessageRef.current = upsertMessage
+
   useEffect(() => {
     if (!user) return
     let cancelled = false
     const topic = `room:${conversationId}:${rtEpoch}`
+    const userId = user.id
 
     setSyncState('reconnecting')
     syncAliveRef.current = false
     lastReconnectAt.current = Date.now()
 
     const channel = supabase.channel(topic, {
-      config: { presence: { key: user.id } },
+      config: { presence: { key: userId } },
     })
 
     const noteEvent = () => {
@@ -929,7 +947,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
               (m) => (clientId && m.clientId === clientId) || m.id === msg.id || m.id === clientId,
             )
             if (
-              msg.sender_id === user.id &&
+              msg.sender_id === userId &&
               local &&
               (local.localStatus === 'uploading' || local.localStatus === 'pending')
             ) {
@@ -942,7 +960,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
               )
               return
             }
-            if (msg.sender_id === user.id && clientId) {
+            if (msg.sender_id === userId && clientId) {
               setMessages((prev) => {
                 const hasLocal = prev.some((m) => m.clientId === clientId || m.id === msg.id)
                 if (hasLocal) {
@@ -960,13 +978,13 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
                 return prev
               })
             }
-            const [enriched] = await enrichMessages([msg])
-            upsertMessage({ ...enriched, clientId })
-            if (msg.sender_id === user.id) return
+            const [enriched] = await enrichMessagesRef.current([msg])
+            upsertMessageRef.current({ ...enriched, clientId })
+            if (msg.sender_id === userId) return
             await supabase.rpc('mark_message_delivered', { p_message_id: msg.id })
             if (document.visibilityState === 'hidden') setHiddenUnread((n) => n + 1)
-            else void markSeen()
-            onActivity()
+            else void markSeenRef.current()
+            onActivityRef.current()
           })()
         },
       )
@@ -1010,7 +1028,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         { event: '*', schema: 'public', table: 'participants', filter: `conversation_id=eq.${conversationId}` },
         () => {
           noteEvent()
-          void refreshParticipants()
+          void refreshParticipantsRef.current()
         },
       )
       .on(
@@ -1047,7 +1065,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
               .select(MESSAGE_SELECT)
               .eq('conversation_id', conversationId)
               .order('created_at', { ascending: true })
-            const enriched = await enrichMessages((rows as Message[]) ?? [])
+            const enriched = await enrichMessagesRef.current((rows as Message[]) ?? [])
             setMessages((prev) => {
               const hadServer = prev.some((m) => !m.localStatus || m.localStatus === 'sent')
               if (hadServer && enriched.length === 0) {
@@ -1057,7 +1075,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
               const liveLocals = prev.filter(
                 (m) => m.localStatus === 'pending' || m.localStatus === 'failed' || m.localStatus === 'uploading',
               )
-              const fromOutbox = user ? outboxToLocalMessages(conversationId, user.id) : []
+              const fromOutbox = outboxToLocalMessages(conversationId, userId)
               return mergeServerWithLocals(enriched, [...liveLocals, ...fromOutbox])
             })
           })()
@@ -1068,7 +1086,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         const state = channel.presenceState<PresencePayload>()
         const byUser = new Map<string, PresencePayload>()
         for (const [key, metas] of Object.entries(state)) {
-          if (key === user.id) continue
+          if (key === userId) continue
           const merged: PresencePayload = {}
           for (const m of metas) {
             if (m.typing) merged.typing = true
@@ -1099,18 +1117,23 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
           } catch {
             /* ignore */
           }
-          void reloadFromServer().then((ok) => {
+          void reloadFromServerRef.current().then((ok) => {
             if (ok) {
-              void markSeen()
-              void flushOutbox()
+              void markSeenRef.current()
+              void flushOutboxRef.current()
             }
           })
           return
         }
-        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+        // CLOSED fires on intentional removeChannel and brief auth rotations —
+        // don't tear down / flip UI for that or we flicker Reconnecting every second.
+        if (status === 'CLOSED') {
+          syncAliveRef.current = false
+          return
+        }
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           syncAliveRef.current = false
           setSyncState('reconnecting')
-          if (cancelled) return
           if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current)
           const attempt = reconnectAttempt.current
           reconnectAttempt.current = attempt + 1
@@ -1129,18 +1152,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
       void supabase.removeChannel(channel)
       if (channelRef.current === channel) channelRef.current = null
     }
-  }, [
-    conversationId,
-    enrichMessages,
-    flushOutbox,
-    markSeen,
-    onActivity,
-    refreshParticipants,
-    reloadFromServer,
-    rtEpoch,
-    upsertMessage,
-    user,
-  ])
+  }, [conversationId, rtEpoch, user?.id])
 
   async function trackPresence(partial: Partial<PresencePayload>) {
     const channel = channelRef.current

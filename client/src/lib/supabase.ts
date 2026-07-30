@@ -27,19 +27,26 @@ export const supabase = createClient(url ?? '', anon ?? '', {
   },
 })
 
+export const isSupabaseConfigured = Boolean(url && anon)
+
+let lastRealtimeAuthToken: string | null = null
+
+async function syncRealtimeAuth(token: string | null | undefined) {
+  const next = token ?? null
+  if (next === lastRealtimeAuthToken) return
+  lastRealtimeAuthToken = next
+  await supabase.realtime.setAuth(next)
+}
+
 // Keep Realtime JWT in sync — expired tokens silently stop send/receive filters
 supabase.auth.onAuthStateChange((event, session) => {
   if (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') {
-    if (session?.access_token) {
-      void supabase.realtime.setAuth(session.access_token)
-    }
+    void syncRealtimeAuth(session?.access_token)
   }
   if (event === 'SIGNED_OUT') {
-    void supabase.realtime.setAuth(anon ?? null)
+    void syncRealtimeAuth(anon ?? null)
   }
 })
-
-export const isSupabaseConfigured = Boolean(url && anon)
 
 export async function ensureFreshSession() {
   const { data, error } = await supabase.auth.getSession()
@@ -52,14 +59,12 @@ export async function ensureFreshSession() {
   if (soon) {
     const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession()
     if (refreshErr) throw refreshErr
-    if (refreshed.session?.access_token) {
-      await supabase.realtime.setAuth(refreshed.session.access_token)
-    }
+    await syncRealtimeAuth(refreshed.session?.access_token)
     return refreshed.session
   }
 
-  if (session.access_token) {
-    await supabase.realtime.setAuth(session.access_token)
-  }
+  // Only push auth to realtime when the token actually changed.
+  // Calling setAuth on every poll tears down channels and causes Reconnecting flicker.
+  await syncRealtimeAuth(session.access_token)
   return session
 }
