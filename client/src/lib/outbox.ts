@@ -30,6 +30,10 @@ export function removeOutbox(clientId: string) {
   write(read().filter((i) => i.clientId !== clientId))
 }
 
+export function clearOutboxForConversation(conversationId: string) {
+  write(read().filter((i) => i.conversationId !== conversationId))
+}
+
 export function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()

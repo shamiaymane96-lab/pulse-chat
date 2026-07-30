@@ -2,7 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
 import type { Attachment, Message, Profile, Reaction } from '../lib/types'
-import { base64ToFile, enqueueOutbox, fileToBase64, listOutbox, removeOutbox } from '../lib/outbox'
+import {
+  base64ToFile,
+  clearOutboxForConversation,
+  enqueueOutbox,
+  fileToBase64,
+  listOutbox,
+  removeOutbox,
+} from '../lib/outbox'
 import { useAuth } from '../contexts/AuthContext'
 import { Composer } from './Composer'
 import { ImageLightbox } from './ImageLightbox'
@@ -40,6 +47,52 @@ function ticksFor(m: Message) {
   if (m.seen_at) return '✓✓'
   if (m.delivered_at) return '✓✓'
   return '✓'
+}
+
+function outboxToLocalMessages(conversationId: string, senderId: string): Message[] {
+  return listOutbox(conversationId).map((item) => {
+    const file =
+      item.fileBase64 && item.fileName
+        ? base64ToFile(item.fileBase64, item.fileName, item.fileType || 'application/octet-stream')
+        : null
+    return {
+      id: item.clientId,
+      clientId: item.clientId,
+      conversation_id: conversationId,
+      sender_id: senderId,
+      body: item.body || item.fileName || null,
+      created_at: item.createdAt,
+      delivered_at: null,
+      seen_at: null,
+      reply_to_id: item.replyToId,
+      attachments: file
+        ? [
+            {
+              id: `${item.clientId}-file`,
+              message_id: item.clientId,
+              storage_path: '',
+              mime_type: file.type,
+              size_bytes: file.size,
+              file_name: file.name,
+              signed_url: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
+            },
+          ]
+        : [],
+      localStatus: 'pending' as const,
+    } satisfies Message
+  })
+}
+
+function mergeServerWithLocals(server: Message[], locals: Message[]) {
+  const serverIds = new Set(server.map((m) => m.id))
+  const kept = locals.filter((m) => {
+    const id = m.clientId ?? m.id
+    return Boolean(m.localStatus) && m.localStatus !== 'sent' && !serverIds.has(id)
+  })
+  const unique = kept.filter(
+    (m, i, arr) => arr.findIndex((x) => (x.clientId ?? x.id) === (m.clientId ?? m.id)) === i,
+  )
+  return [...server, ...unique].sort((a, b) => a.created_at.localeCompare(b.created_at))
 }
 
 export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props) {
@@ -378,40 +431,10 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
       }
 
       const enriched = await enrichMessages((rows as Message[]) ?? [])
-      const pendingLocal = listOutbox(conversationId).map((item) => {
-        const file =
-          item.fileBase64 && item.fileName
-            ? base64ToFile(item.fileBase64, item.fileName, item.fileType || 'application/octet-stream')
-            : null
-        return {
-          id: item.clientId,
-          clientId: item.clientId,
-          conversation_id: conversationId,
-          sender_id: user!.id,
-          body: item.body || item.fileName || null,
-          created_at: item.createdAt,
-          delivered_at: null,
-          seen_at: null,
-          reply_to_id: item.replyToId,
-          attachments: file
-            ? [
-                {
-                  id: `${item.clientId}-file`,
-                  message_id: item.clientId,
-                  storage_path: '',
-                  mime_type: file.type,
-                  size_bytes: file.size,
-                  file_name: file.name,
-                  signed_url: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
-                },
-              ]
-            : [],
-          localStatus: 'pending' as const,
-        } satisfies Message
-      })
+      const pendingLocal = outboxToLocalMessages(conversationId, user!.id)
 
       if (!cancelled) {
-        setMessages([...enriched, ...pendingLocal].sort((a, b) => a.created_at.localeCompare(b.created_at)))
+        setMessages(mergeServerWithLocals(enriched, pendingLocal))
         setLoading(false)
       }
       await markSeen()
@@ -472,11 +495,12 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${conversationId}` },
         (payload) => {
           const msg = payload.new as Message
-          if (msg.sender_id === user.id) return
           void (async () => {
+            // Own inserts still matter for multi-tab; skip receipt/unread for self
             await new Promise((r) => window.setTimeout(r, 350))
             const [enriched] = await enrichMessages([msg])
             upsertMessage(enriched)
+            if (msg.sender_id === user.id) return
             await supabase.rpc('mark_message_delivered', { p_message_id: msg.id })
             if (document.visibilityState === 'hidden') setHiddenUnread((n) => n + 1)
             else void markSeen()
@@ -522,7 +546,13 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
               list.push(r)
               byMsg.set(r.message_id, list)
             }
-            setMessages((prev) => prev.map((m) => ({ ...m, reactions: byMsg.get(m.id) ?? m.reactions ?? [] })))
+            setMessages((prev) =>
+              prev.map((m) => ({
+                ...m,
+                // Always replace from fetch so removed reactions clear for peers
+                reactions: byMsg.get(m.id) ?? [],
+              })),
+            )
           })()
         },
       )
@@ -530,7 +560,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         'postgres_changes',
         { event: 'DELETE', schema: 'public', table: 'messages', filter: `conversation_id=eq.${conversationId}` },
         () => {
-          // bulk clears arrive as deletes; reload cheaply
+          // bulk clears arrive as deletes; reload and keep local outbox bubbles
           void (async () => {
             const { data: rows } = await supabase
               .from('messages')
@@ -538,7 +568,19 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
               .eq('conversation_id', conversationId)
               .order('created_at', { ascending: true })
             const enriched = await enrichMessages((rows as Message[]) ?? [])
-            setMessages(enriched)
+            setMessages((prev) => {
+              const hadServer = prev.some((m) => !m.localStatus || m.localStatus === 'sent')
+              // Peer/local clear wiped the room — drop queued sends so they don't resurrect
+              if (hadServer && enriched.length === 0) {
+                clearOutboxForConversation(conversationId)
+                return []
+              }
+              const liveLocals = prev.filter(
+                (m) => m.localStatus === 'pending' || m.localStatus === 'failed' || m.localStatus === 'uploading',
+              )
+              const fromOutbox = user ? outboxToLocalMessages(conversationId, user.id) : []
+              return mergeServerWithLocals(enriched, [...liveLocals, ...fromOutbox])
+            })
           })()
         },
       )
@@ -584,7 +626,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
       setError(err.message)
       return
     }
-    for (const item of listOutbox(conversationId)) removeOutbox(item.clientId)
+    clearOutboxForConversation(conversationId)
     setMessages([])
   }
 

@@ -9,6 +9,7 @@ import {
 } from 'react'
 import type { Session, User } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
+import { clearOutboxForConversation } from '../lib/outbox'
 import type { Profile } from '../lib/types'
 
 type AuthContextValue = {
@@ -135,6 +136,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch {
         /* ignore */
       }
+      clearOutboxForConversation(roomId)
     }
     localStorage.removeItem(ROOM_KEY)
     localStorage.removeItem(CODE_KEY)

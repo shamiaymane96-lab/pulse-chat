@@ -216,7 +216,7 @@ create policy "participants_select_member"
 drop policy if exists "participants_insert_self" on public.participants;
 create policy "participants_insert_self"
   on public.participants for insert to authenticated
-  with check (user_id = auth.uid() or public.is_conversation_participant(conversation_id));
+  with check (user_id = auth.uid());
 
 drop policy if exists "participants_update_own" on public.participants;
 create policy "participants_update_own"
@@ -238,10 +238,8 @@ create policy "messages_insert_participant"
     and public.is_conversation_participant(conversation_id)
   );
 
+-- Message body/receipt updates go through SECURITY DEFINER RPCs only
 drop policy if exists "messages_update_participant" on public.messages;
-create policy "messages_update_participant"
-  on public.messages for update to authenticated
-  using (public.is_conversation_participant(conversation_id));
 
 -- Attachments
 drop policy if exists "attachments_select_participant" on public.attachments;
@@ -281,6 +279,12 @@ drop policy if exists "push_delete_own" on public.push_subscriptions;
 create policy "push_delete_own"
   on public.push_subscriptions for delete to authenticated
   using (user_id = auth.uid());
+
+drop policy if exists "push_update_own" on public.push_subscriptions;
+create policy "push_update_own"
+  on public.push_subscriptions for update to authenticated
+  using (user_id = auth.uid())
+  with check (user_id = auth.uid());
 
 -- Realtime (ignore if already added)
 do $$
