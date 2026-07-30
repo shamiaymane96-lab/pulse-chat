@@ -423,12 +423,6 @@ code {
   .bubble {
     max-width: min(62%, 640px);
   }
-
-  .composer-tools {
-    max-width: none;
-    flex-direction: row;
-    flex-wrap: nowrap;
-  }
 }
 
 .bubble.mine {
@@ -505,9 +499,10 @@ code {
 .composer-tools {
   display: flex;
   flex-direction: row;
-  flex-wrap: wrap;
-  gap: 0.3rem;
-  max-width: 7.2rem;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
 }
 
 .icon-btn {
@@ -918,10 +913,6 @@ code {
 
   .chat-header .back {
     display: inline-flex;
-  }
-
-  .composer-tools {
-    max-width: none;
   }
 
   .icon-btn {
