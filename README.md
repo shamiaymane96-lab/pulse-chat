@@ -1,5 +1,7 @@
 # Pulse Chat
 
+Live app: **https://shamiaymane96-lab.github.io/pulse-chat/**
+
 WhatsApp-like messaging PWA: **GitHub Pages** (frontend) + **Supabase** (auth, Postgres, realtime, storage, push).
 
 ## Phase 1 features
