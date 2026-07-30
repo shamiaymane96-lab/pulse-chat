@@ -19,7 +19,7 @@ type AuthContextValue = {
   loading: boolean
   activeRoomId: string | null
   activeCode: string | null
-  joinWithCode: (code: string, displayName: string) => Promise<string | null>
+  joinWithCode: (code: string, displayName: string, maxParticipants?: number) => Promise<string | null>
   leave: () => Promise<void>
   setRoomCode: (code: string) => void
 }
@@ -104,15 +104,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => window.clearInterval(id)
   }, [session?.user?.id])
 
-  const joinWithCode = useCallback(async (code: string, displayName: string) => {
+  const joinWithCode = useCallback(async (code: string, displayName: string, maxParticipants?: number) => {
     try {
       const nextSession = await ensureGuestSession()
       setSession(nextSession)
 
-      const { data, error } = await supabase.rpc('join_room_by_code', {
+      const payload: {
+        p_code: string
+        p_display_name: string
+        p_max_participants?: number
+      } = {
         p_code: code,
         p_display_name: displayName,
-      })
+      }
+      if (typeof maxParticipants === 'number' && Number.isFinite(maxParticipants)) {
+        payload.p_max_participants = Math.min(20, Math.max(2, Math.round(maxParticipants)))
+      }
+
+      const { data, error } = await supabase.rpc('join_room_by_code', payload)
       if (error) return error.message
 
       const roomId = data as string

@@ -163,6 +163,7 @@ code {
 }
 
 .auth-form input,
+.auth-form select,
 .modal input,
 .composer-input {
   width: 100%;
@@ -174,10 +175,32 @@ code {
   outline: none;
 }
 
+.auth-form select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 18px) calc(50% - 3px),
+    calc(100% - 12px) calc(50% - 3px);
+  background-size:
+    6px 6px,
+    6px 6px;
+  background-repeat: no-repeat;
+  padding-right: 2rem;
+}
+
 .auth-form input:focus,
+.auth-form select:focus,
 .modal input:focus,
 .composer-input:focus {
   border-color: color-mix(in srgb, var(--brand) 60%, var(--line));
+}
+
+.field-hint {
+  margin: -0.35rem 0 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+  line-height: 1.35;
 }
 
 .app-shell {
@@ -387,6 +410,13 @@ code {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.sender-name {
+  margin: 0 0 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--brand);
 }
 
 .bubble footer {

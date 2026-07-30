@@ -99,7 +99,9 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   const { user, setRoomCode } = useAuth()
   const [messages, setMessages] = useState<Message[]>([])
   const [other, setOther] = useState<Profile | null>(null)
+  const [others, setOthers] = useState<Profile[]>([])
   const [peerCount, setPeerCount] = useState(1)
+  const [maxParticipants, setMaxParticipants] = useState(2)
   const [peerTyping, setPeerTyping] = useState(false)
   const [peerOnline, setPeerOnline] = useState(false)
   const [peerLastRead, setPeerLastRead] = useState<string | null>(null)
@@ -122,13 +124,27 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   }, [messages])
 
   const waitingForPeer = peerCount < 2
+  const isGroup = maxParticipants > 2
 
   const title = useMemo(() => {
+    if (waitingForPeer) return 'Waiting for peers…'
+    if (isGroup) {
+      if (others.length === 0) return `Room · ${peerCount}/${maxParticipants}`
+      const names = others.map((p) => p.display_name).filter(Boolean)
+      if (names.length <= 2) return `${names.join(', ')} · ${peerCount}/${maxParticipants}`
+      return `${names[0]} +${names.length - 1} · ${peerCount}/${maxParticipants}`
+    }
     if (other?.display_name) return other.display_name
-    if (waitingForPeer) return 'Waiting for peer…'
     if (roomCode) return `Code ${roomCode}`
     return 'Chat'
-  }, [other, roomCode, waitingForPeer])
+  }, [isGroup, maxParticipants, other, others, peerCount, roomCode, waitingForPeer])
+
+  const nameById = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const p of others) map.set(p.id, p.display_name)
+    if (other) map.set(other.id, other.display_name)
+    return map
+  }, [other, others])
 
   const shareText = useMemo(() => {
     const code = roomCode ?? ''
@@ -183,16 +199,31 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
 
   const refreshParticipants = useCallback(async () => {
     if (!user) return
-    const { data: parts } = await supabase
-      .from('participants')
-      .select('user_id, last_read_at, profiles(id, username, display_name, avatar_url, last_seen)')
-      .eq('conversation_id', conversationId)
+    const [{ data: parts }, { data: conv }] = await Promise.all([
+      supabase
+        .from('participants')
+        .select('user_id, last_read_at, profiles(id, username, display_name, avatar_url, last_seen)')
+        .eq('conversation_id', conversationId),
+      supabase.from('conversations').select('max_participants').eq('id', conversationId).maybeSingle(),
+    ])
 
     const rows = parts ?? []
     setPeerCount(rows.length)
-    const otherRow = rows.find((p) => p.user_id !== user.id)
-    setOther((otherRow?.profiles as unknown as Profile | undefined) ?? null)
-    setPeerLastRead((otherRow?.last_read_at as string | null) ?? null)
+    if (conv?.max_participants) setMaxParticipants(conv.max_participants)
+
+    const peerRows = rows.filter((p) => p.user_id !== user.id)
+    const peerProfiles = peerRows
+      .map((p) => p.profiles as unknown as Profile | null)
+      .filter((p): p is Profile => Boolean(p))
+    setOthers(peerProfiles)
+    setOther(peerProfiles[0] ?? null)
+
+    // For receipts: use the earliest last_read among peers (all must have read for "seen" in groups)
+    // For 1:1 keep single peer; for groups mark seen when message.seen_at is set by RPC
+    const reads = peerRows.map((p) => p.last_read_at as string | null).filter(Boolean) as string[]
+    if (reads.length === 0) setPeerLastRead(null)
+    else if (peerProfiles.length <= 1) setPeerLastRead(reads[0] ?? null)
+    else setPeerLastRead(reads.sort()[0] ?? null)
   }, [conversationId, user])
 
   const markSeen = useCallback(async () => {
@@ -663,15 +694,19 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
           <p className="muted status-line">
             {!online ? 'Offline · queued sends' : ''}
             {online && waitingForPeer
-              ? 'Only you are here'
+              ? `Only you · ${peerCount}/${maxParticipants}`
               : online && peerTyping
                 ? 'typing…'
                 : online && peerOnline
-                  ? 'online'
+                  ? isGroup
+                    ? `online · ${peerCount}/${maxParticipants}`
+                    : 'online'
                   : online && other
                     ? 'last seen recently'
                     : online
-                      ? ' '
+                      ? isGroup
+                        ? `${peerCount}/${maxParticipants}`
+                        : ' '
                       : ''}
           </p>
         </div>
@@ -702,8 +737,11 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         {!loading && waitingForPeer && (
           <div className="waiting-card">
             <p className="brand-sm">Pulse</p>
-            <h2>Waiting for the other person</h2>
-            <p className="muted">Share this code so they can join from any device.</p>
+            <h2>{maxParticipants > 2 ? 'Waiting for others' : 'Waiting for the other person'}</h2>
+            <p className="muted">
+              Share this code so they can join from any device.
+              {maxParticipants > 2 ? ` Room holds up to ${maxParticipants} people.` : ''}
+            </p>
             <p className="waiting-code">{roomCode}</p>
             <div className="waiting-actions">
               <button type="button" className="btn primary" onClick={() => void copyCode()}>
@@ -730,6 +768,9 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
             return (
               <div key={m.clientId ?? m.id} className={`bubble-row ${mine ? 'mine' : 'theirs'}`}>
                 <div className={`bubble ${mine ? 'mine' : 'theirs'} ${m.localStatus === 'failed' ? 'failed' : ''}`}>
+                  {!mine && isGroup && (
+                    <p className="sender-name">{nameById.get(m.sender_id) ?? 'Member'}</p>
+                  )}
                   {m.reply_preview && (
                     <div className="reply-quote">{(m.reply_preview.body || 'Attachment').slice(0, 80)}</div>
                   )}

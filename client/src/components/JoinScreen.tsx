@@ -16,10 +16,16 @@ function codeFromUrl() {
   return (params.get('code') ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '')
 }
 
+const MAX_OPTIONS = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20]
+
 export function JoinScreen() {
   const { joinWithCode } = useAuth()
   const [displayName, setDisplayName] = useState(() => localStorage.getItem('pulse_display_name') ?? '')
   const [code, setCode] = useState(() => codeFromUrl())
+  const [maxPeople, setMaxPeople] = useState(() => {
+    const saved = Number(localStorage.getItem('pulse_max_people') || '2')
+    return MAX_OPTIONS.includes(saved) ? saved : 2
+  })
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -44,7 +50,9 @@ export function JoinScreen() {
     setBusy(true)
     try {
       localStorage.setItem('pulse_display_name', trimmedName)
-      const err = await joinWithCode(trimmedCode, trimmedName)
+      localStorage.setItem('pulse_max_people', String(maxPeople))
+      // Capacity is applied only when this code creates (or reclaims) a room
+      const err = await joinWithCode(trimmedCode, trimmedName, maxPeople)
       if (err) {
         if (/invalid api key/i.test(err)) {
           setError('App cache is stale. Close all Pulse tabs, reopen the site, then try again.')
@@ -66,7 +74,7 @@ export function JoinScreen() {
       <div className="auth-panel">
         <p className="brand">Pulse</p>
         <h1>Enter the same code</h1>
-        <p className="muted">Both devices type one shared code to meet in a private chat.</p>
+        <p className="muted">Share one code. The first person to join sets how many people can enter.</p>
 
         <form className="auth-form" onSubmit={(e) => void onSubmit(e)}>
           <label>
@@ -93,6 +101,23 @@ export function JoinScreen() {
               maxLength={12}
             />
           </label>
+          <label>
+            Max people
+            <select
+              value={maxPeople}
+              onChange={(e) => setMaxPeople(Number(e.target.value))}
+              aria-describedby="max-people-hint"
+            >
+              {MAX_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n} {n === 2 ? '(1-to-1)' : 'people'}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p id="max-people-hint" className="field-hint">
+            Used only when this code creates a new room. Existing rooms keep their limit.
+          </p>
 
           {error && <p className="error">{error}</p>}
 
