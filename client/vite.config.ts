@@ -45,7 +45,7 @@ export default defineConfig({
       },
       workbox: {
         // Bump cache names so clients drop the bad-key deploy (Jul 2026)
-        cacheId: 'pulse-v8',
+        cacheId: 'pulse-v9',
         cleanupOutdatedCaches: true,
         clientsClaim: true,
         skipWaiting: true,

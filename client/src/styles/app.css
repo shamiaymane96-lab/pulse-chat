@@ -219,7 +219,11 @@ code {
 
 .app-shell.single-chat {
   grid-template-columns: 1fr;
-  max-width: 860px;
+  max-width: none;
+  width: 100%;
+  margin: 0;
+  border-left: 0;
+  border-right: 0;
 }
 
 .app-shell.single-chat .chat-header .back {
@@ -397,6 +401,34 @@ code {
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+@media (min-width: 821px) {
+  .app-shell.single-chat .chat-view {
+    max-width: 1200px;
+    width: 100%;
+    margin: 0 auto;
+  }
+
+  .app-shell.single-chat .message-scroller {
+    padding: 1.25rem 1.75rem;
+  }
+
+  .app-shell.single-chat .chat-header,
+  .app-shell.single-chat .composer {
+    padding-left: 1.25rem;
+    padding-right: 1.25rem;
+  }
+
+  .bubble {
+    max-width: min(62%, 640px);
+  }
+
+  .composer-tools {
+    max-width: none;
+    flex-direction: row;
+    flex-wrap: nowrap;
+  }
 }
 
 .bubble.mine {
