@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type ChangeEvent, type PointerEvent } from 'react'
 import type { Message } from '../lib/types'
+import { isAllowedChatFile } from '../lib/fileAllowlist'
 
 type Props = {
   disabled?: boolean
@@ -89,10 +90,13 @@ export function Composer({
 
   function takeFile(next: File | null, input?: HTMLInputElement | null) {
     if (editing) return
-    if (next && next.size > 50 * 1024 * 1024) {
-      alert('File must be 50MB or smaller')
-      if (input) input.value = ''
-      return
+    if (next) {
+      const check = isAllowedChatFile(next)
+      if (!check.ok) {
+        alert(check.reason)
+        if (input) input.value = ''
+        return
+      }
     }
     setFile(next)
   }

@@ -16,6 +16,7 @@ import { ImageLightbox } from './ImageLightbox'
 import { MessageActionSheet } from './MessageActionSheet'
 import { hardRefreshApp } from '../lib/hardRefresh'
 import { roomLink, syncCodeInUrl } from '../lib/roomLink'
+import { isAllowedChatFile, isSafeImageMime } from '../lib/fileAllowlist'
 
 type Props = {
   conversationId: string
@@ -41,7 +42,7 @@ function isAudio(mime: string) {
 }
 
 function isImage(mime: string) {
-  return mime.startsWith('image/')
+  return isSafeImageMime(mime)
 }
 
 function ticksFor(m: Message) {
@@ -369,6 +370,13 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
     async (body: string, file: File | null, replyToId: string | null, clientId: string) => {
       if (!user) return
 
+      let uploadMime: string | null = null
+      if (file) {
+        const check = isAllowedChatFile(file)
+        if (!check.ok) throw new Error(check.reason)
+        uploadMime = check.mime
+      }
+
       try {
         await ensureFreshSession()
       } catch (err) {
@@ -427,7 +435,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
           .maybeSingle()
         if (!existingAtt) {
           const { error: upErr } = await supabase.storage.from('chat-files').upload(path, file, {
-            contentType: file.type || 'application/octet-stream',
+            contentType: uploadMime || file.type || 'application/octet-stream',
             upsert: true,
           })
           if (upErr) {
@@ -437,7 +445,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
           const { error: attErr } = await supabase.from('attachments').insert({
             message_id: inserted.id,
             storage_path: path,
-            mime_type: file.type || 'application/octet-stream',
+            mime_type: uploadMime || file.type || 'application/octet-stream',
             size_bytes: file.size,
             file_name: file.name,
           })
