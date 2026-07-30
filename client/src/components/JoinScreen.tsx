@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { isSupabaseConfigured } from '../lib/supabase'
+import { hardRefreshApp } from '../lib/hardRefresh'
 
 function randomCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -131,6 +132,14 @@ export function JoinScreen() {
             onClick={() => setCode(randomCode())}
           >
             Generate a new code
+          </button>
+          <button
+            type="button"
+            className="btn ghost"
+            disabled={busy}
+            onClick={() => void hardRefreshApp()}
+          >
+            Refresh app
           </button>
         </form>
       </div>

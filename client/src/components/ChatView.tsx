@@ -13,6 +13,7 @@ import {
 import { useAuth } from '../contexts/AuthContext'
 import { Composer } from './Composer'
 import { ImageLightbox } from './ImageLightbox'
+import { hardRefreshApp } from '../lib/hardRefresh'
 
 type Props = {
   conversationId: string
@@ -999,6 +1000,16 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
                     }}
                   >
                     New code
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setHeaderMenuOpen(false)
+                      void hardRefreshApp()
+                    }}
+                  >
+                    Refresh app
                   </button>
                 </div>
               </>
