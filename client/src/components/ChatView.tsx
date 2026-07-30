@@ -224,14 +224,21 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
           contentType: file.type || 'application/octet-stream',
           upsert: false,
         })
-        if (upErr) throw new Error(upErr.message)
-        await supabase.from('attachments').insert({
+        if (upErr) {
+          await supabase.from('messages').delete().eq('id', inserted.id)
+          throw new Error(upErr.message)
+        }
+        const { error: attErr } = await supabase.from('attachments').insert({
           message_id: inserted.id,
           storage_path: path,
           mime_type: file.type || 'application/octet-stream',
           size_bytes: file.size,
           file_name: file.name,
         })
+        if (attErr) {
+          await supabase.from('messages').delete().eq('id', inserted.id)
+          throw new Error(attErr.message)
+        }
       }
 
       const [enriched] = await enrichMessages([inserted as Message])
@@ -470,6 +477,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
             await new Promise((r) => window.setTimeout(r, 350))
             const [enriched] = await enrichMessages([msg])
             upsertMessage(enriched)
+            await supabase.rpc('mark_message_delivered', { p_message_id: msg.id })
             if (document.visibilityState === 'hidden') setHiddenUnread((n) => n + 1)
             else void markSeen()
             onActivity()
@@ -576,6 +584,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
       setError(err.message)
       return
     }
+    for (const item of listOutbox(conversationId)) removeOutbox(item.clientId)
     setMessages([])
   }
 
@@ -673,6 +682,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
               m.body && !(audio && (m.body === 'Voice note' || m.body === audio.file_name))
             const grouped = new Map<string, number>()
             for (const r of m.reactions ?? []) grouped.set(r.emoji, (grouped.get(r.emoji) ?? 0) + 1)
+            const canAct = !m.clientId && m.localStatus !== 'pending' && m.localStatus !== 'uploading' && m.localStatus !== 'failed'
             const status = receiptLabel(m)
 
             return (
@@ -715,6 +725,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
                           key={emoji}
                           type="button"
                           className="reaction-pill"
+                          disabled={!canAct}
                           onClick={() => void toggleReaction(m.id, emoji)}
                         >
                           {emoji} {count > 1 ? count : ''}
@@ -723,16 +734,20 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
                     </div>
                   )}
                   <footer>
-                    <button type="button" className="msg-action" onClick={() => setReplyTo(m)}>
-                      Reply
-                    </button>
-                    <button
-                      type="button"
-                      className="msg-action"
-                      onClick={() => setMenuFor(menuFor === m.id ? null : m.id)}
-                    >
-                      React
-                    </button>
+                    {canAct && (
+                      <>
+                        <button type="button" className="msg-action" onClick={() => setReplyTo(m)}>
+                          Reply
+                        </button>
+                        <button
+                          type="button"
+                          className="msg-action"
+                          onClick={() => setMenuFor(menuFor === m.id ? null : m.id)}
+                        >
+                          React
+                        </button>
+                      </>
+                    )}
                     <time>{formatTime(m.created_at)}</time>
                     {mine && (
                       <span className={`ticks ${m.seen_at || (peerLastRead && peerLastRead >= m.created_at) ? 'seen' : ''}`}>
@@ -741,7 +756,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
                     )}
                   </footer>
                   {status && <p className="receipt-label">{status}</p>}
-                  {menuFor === m.id && !m.clientId && (
+                  {menuFor === m.id && canAct && (
                     <div className="react-menu">
                       {REACTION_SET.map((emoji) => (
                         <button key={emoji} type="button" onClick={() => void toggleReaction(m.id, emoji)}>

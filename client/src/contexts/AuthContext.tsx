@@ -128,12 +128,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [loadProfile])
 
   const leave = useCallback(async () => {
+    const roomId = localStorage.getItem(ROOM_KEY)
+    if (roomId) {
+      try {
+        await supabase.rpc('leave_room', { p_conversation_id: roomId })
+      } catch {
+        /* ignore */
+      }
+    }
     localStorage.removeItem(ROOM_KEY)
     localStorage.removeItem(CODE_KEY)
     setActiveRoomId(null)
     setActiveCode(null)
-    await supabase.auth.signOut()
-    setProfile(null)
+    // Keep anonymous session so rejoining the same code does not create a 3rd identity
   }, [])
 
   const setRoomCode = useCallback((code: string) => {
