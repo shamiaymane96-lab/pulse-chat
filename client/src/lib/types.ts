@@ -16,6 +16,12 @@ export type Attachment = {
   signed_url?: string
 }
 
+export type Reaction = {
+  message_id: string
+  user_id: string
+  emoji: string
+}
+
 export type Message = {
   id: string
   conversation_id: string
@@ -23,7 +29,14 @@ export type Message = {
   body: string | null
   created_at: string
   delivered_at: string | null
+  seen_at?: string | null
+  reply_to_id?: string | null
   attachments?: Attachment[]
+  reactions?: Reaction[]
+  reply_preview?: { id: string; body: string | null; sender_id: string } | null
+  localStatus?: 'pending' | 'uploading' | 'failed' | 'sent'
+  localProgress?: number
+  clientId?: string
 }
 
 export type ConversationPreview = {
@@ -33,4 +46,15 @@ export type ConversationPreview = {
   other?: Profile
   last_message?: Message | null
   unread: number
+}
+
+export type OutboxItem = {
+  clientId: string
+  conversationId: string
+  body: string
+  replyToId: string | null
+  fileName?: string
+  fileType?: string
+  fileBase64?: string
+  createdAt: string
 }

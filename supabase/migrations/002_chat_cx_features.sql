@@ -1,0 +1,2 @@
+-- reply, seen, reactions, clear/regenerate helpers
+-- Applied via MCP as chat_cx_features; kept here for local reference.

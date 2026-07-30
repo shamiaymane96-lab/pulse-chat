@@ -20,6 +20,7 @@ type AuthContextValue = {
   activeCode: string | null
   joinWithCode: (code: string, displayName: string) => Promise<string | null>
   leave: () => Promise<void>
+  setRoomCode: (code: string) => void
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -135,6 +136,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setProfile(null)
   }, [])
 
+  const setRoomCode = useCallback((code: string) => {
+    const normalized = code.toUpperCase().replace(/[^A-Z0-9]/g, '')
+    localStorage.setItem(CODE_KEY, normalized)
+    setActiveCode(normalized)
+  }, [])
+
   const value = useMemo(
     () => ({
       session,
@@ -145,8 +152,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       activeCode,
       joinWithCode,
       leave,
+      setRoomCode,
     }),
-    [session, profile, loading, activeRoomId, activeCode, joinWithCode, leave],
+    [session, profile, loading, activeRoomId, activeCode, joinWithCode, leave, setRoomCode],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

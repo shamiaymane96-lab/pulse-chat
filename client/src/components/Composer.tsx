@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent, type ChangeEvent, type PointerEvent } from 'react'
+import type { Message } from '../lib/types'
 
 type Props = {
   disabled?: boolean
-  onSend: (body: string, file: File | null) => Promise<void>
+  replyTo?: Message | null
+  onCancelReply?: () => void
+  onSend: (body: string, file: File | null, replyToId: string | null) => Promise<void>
   onTyping: (typing: boolean) => void
 }
 
@@ -19,7 +22,7 @@ function pickRecorderMime() {
   return ''
 }
 
-export function Composer({ disabled, onSend, onTyping }: Props) {
+export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }: Props) {
   const [text, setText] = useState('')
   const [file, setFile] = useState<File | null>(null)
   const [busy, setBusy] = useState(false)
@@ -72,13 +75,14 @@ export function Composer({ disabled, onSend, onTyping }: Props) {
     if (!body && !file) return
     setBusy(true)
     try {
-      await onSend(body, file)
+      await onSend(body, file, replyTo?.id ?? null)
       setText('')
       setFile(null)
       if (fileRef.current) fileRef.current.value = ''
       if (galleryRef.current) galleryRef.current.value = ''
       if (cameraRef.current) cameraRef.current.value = ''
       onTyping(false)
+      onCancelReply?.()
     } finally {
       setBusy(false)
     }
@@ -128,8 +132,9 @@ export function Composer({ disabled, onSend, onTyping }: Props) {
         void (async () => {
           setBusy(true)
           try {
-            await onSend('Voice note', voice)
+            await onSend('Voice note', voice, replyTo?.id ?? null)
             onTyping(false)
+            onCancelReply?.()
           } finally {
             setBusy(false)
           }
@@ -166,13 +171,7 @@ export function Composer({ disabled, onSend, onTyping }: Props) {
 
   return (
     <form className="composer" onSubmit={(e) => void submit(e)}>
-      <input
-        ref={fileRef}
-        type="file"
-        className="file-input"
-        onChange={onFile}
-        disabled={disabled || busy || recording}
-      />
+      <input ref={fileRef} type="file" className="file-input" onChange={onFile} disabled={disabled || busy || recording} />
       <input
         ref={galleryRef}
         type="file"
@@ -192,36 +191,26 @@ export function Composer({ disabled, onSend, onTyping }: Props) {
       />
 
       <div className="composer-tools">
-        <button
-          type="button"
-          className="btn ghost icon-btn"
-          disabled={disabled || busy || recording}
-          onClick={() => cameraRef.current?.click()}
-          title="Camera"
-        >
+        <button type="button" className="btn ghost icon-btn" disabled={disabled || busy || recording} onClick={() => cameraRef.current?.click()}>
           Cam
         </button>
-        <button
-          type="button"
-          className="btn ghost icon-btn"
-          disabled={disabled || busy || recording}
-          onClick={() => galleryRef.current?.click()}
-          title="Gallery"
-        >
+        <button type="button" className="btn ghost icon-btn" disabled={disabled || busy || recording} onClick={() => galleryRef.current?.click()}>
           Pic
         </button>
-        <button
-          type="button"
-          className="btn ghost icon-btn"
-          disabled={disabled || busy || recording}
-          onClick={() => fileRef.current?.click()}
-          title="Attach file"
-        >
+        <button type="button" className="btn ghost icon-btn" disabled={disabled || busy || recording} onClick={() => fileRef.current?.click()}>
           File
         </button>
       </div>
 
       <div className="composer-main">
+        {replyTo && (
+          <div className="reply-chip">
+            <span>Replying: {(replyTo.body || 'Attachment').slice(0, 60)}</span>
+            <button type="button" onClick={onCancelReply} aria-label="Cancel reply">
+              ×
+            </button>
+          </div>
+        )}
         {recording ? (
           <div className="recording-bar">
             <span className="rec-dot" />
