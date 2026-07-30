@@ -10,6 +10,7 @@ import {
 import type { Session, User } from '@supabase/supabase-js'
 import { ensureFreshSession, supabase } from '../lib/supabase'
 import { clearOutboxForConversation } from '../lib/outbox'
+import { codeFromUrl, syncCodeInUrl } from '../lib/roomLink'
 import type { Profile } from '../lib/types'
 
 type AuthContextValue = {
@@ -72,8 +73,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!mounted) return
       setSession(data.session)
 
+      const urlCode = codeFromUrl()
+      const savedCode = localStorage.getItem(CODE_KEY)
       const roomId = localStorage.getItem(ROOM_KEY)
-      if (data.session?.user && roomId) {
+
+      // Bookmarked ?code= wins over a different saved room
+      if (urlCode && savedCode && urlCode !== savedCode && roomId) {
+        try {
+          await supabase.rpc('leave_room', { p_conversation_id: roomId })
+        } catch {
+          /* ignore */
+        }
+        clearOutboxForConversation(roomId)
+        localStorage.removeItem(ROOM_KEY)
+        localStorage.removeItem(CODE_KEY)
+        setActiveRoomId(null)
+        setActiveCode(null)
+      } else if (data.session?.user && roomId) {
         const { data: membership } = await supabase
           .from('participants')
           .select('user_id')
@@ -85,7 +101,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           localStorage.removeItem(CODE_KEY)
           setActiveRoomId(null)
           setActiveCode(null)
+        } else if (savedCode) {
+          syncCodeInUrl(savedCode)
         }
+      } else if (urlCode) {
+        syncCodeInUrl(urlCode)
       }
 
       if (data.session?.user) {
@@ -157,6 +177,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       localStorage.setItem(CODE_KEY, normalized)
       setActiveRoomId(roomId)
       setActiveCode(normalized)
+      syncCodeInUrl(normalized)
       await loadProfile(nextSession.user.id)
       return null
     } catch (err) {
@@ -166,10 +187,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const leave = useCallback(async () => {
     const roomId = localStorage.getItem(ROOM_KEY)
+    const code = localStorage.getItem(CODE_KEY)
     if (roomId) {
       const { error } = await supabase.rpc('leave_room', { p_conversation_id: roomId })
       if (error) {
-        // Still clear local UI so the user isn't stuck, but surface failure
         console.error('leave_room failed', error.message)
       }
       clearOutboxForConversation(roomId)
@@ -178,13 +199,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem(CODE_KEY)
     setActiveRoomId(null)
     setActiveCode(null)
-    // Keep anonymous session so rejoining the same code does not create a 3rd identity
+    // Keep ?code= so Leave still lets you bookmark / rejoin the same room
+    if (code) syncCodeInUrl(code)
   }, [])
 
   const setRoomCode = useCallback((code: string) => {
     const normalized = code.toUpperCase().replace(/[^A-Z0-9]/g, '')
     localStorage.setItem(CODE_KEY, normalized)
     setActiveCode(normalized)
+    syncCodeInUrl(normalized)
   }, [])
 
   const value = useMemo(

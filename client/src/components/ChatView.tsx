@@ -14,6 +14,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { Composer } from './Composer'
 import { ImageLightbox } from './ImageLightbox'
 import { hardRefreshApp } from '../lib/hardRefresh'
+import { roomLink, syncCodeInUrl } from '../lib/roomLink'
 
 type Props = {
   conversationId: string
@@ -175,8 +176,12 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
 
   const shareText = useMemo(() => {
     const code = roomCode ?? ''
-    const link = `${window.location.origin}${window.location.pathname}?code=${encodeURIComponent(code)}`
+    const link = roomLink(code)
     return `Join my Pulse chat with code ${code}\n${link}`
+  }, [roomCode])
+
+  useEffect(() => {
+    if (roomCode) syncCodeInUrl(roomCode)
   }, [roomCode])
 
   const enrichMessages = useCallback(async (rows: Message[]) => {

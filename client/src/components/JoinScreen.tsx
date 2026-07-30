@@ -1,7 +1,8 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { isSupabaseConfigured } from '../lib/supabase'
 import { hardRefreshApp } from '../lib/hardRefresh'
+import { codeFromUrl, syncCodeInUrl } from '../lib/roomLink'
 
 function randomCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -10,11 +11,6 @@ function randomCode() {
     out += alphabet[Math.floor(Math.random() * alphabet.length)]
   }
   return out
-}
-
-function codeFromUrl() {
-  const params = new URLSearchParams(window.location.search)
-  return (params.get('code') ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '')
 }
 
 const MAX_OPTIONS = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20]
@@ -29,21 +25,22 @@ export function JoinScreen() {
   })
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const autoTried = useRef(false)
 
   useEffect(() => {
     const fromUrl = codeFromUrl()
-    if (fromUrl) setCode(fromUrl)
+    if (fromUrl) {
+      setCode(fromUrl)
+      syncCodeInUrl(fromUrl)
+    }
   }, [])
 
-  async function onSubmit(e: FormEvent) {
-    e.preventDefault()
+  async function join(trimmedName: string, trimmedCode: string) {
     setError(null)
     if (!isSupabaseConfigured) {
       setError('Supabase is not configured')
       return
     }
-    const trimmedName = displayName.trim() || 'Guest'
-    const trimmedCode = code.trim()
     if (trimmedCode.length < 4) {
       setError('Enter a code with at least 4 characters')
       return
@@ -52,7 +49,6 @@ export function JoinScreen() {
     try {
       localStorage.setItem('pulse_display_name', trimmedName)
       localStorage.setItem('pulse_max_people', String(maxPeople))
-      // Capacity is applied only when this code creates (or reclaims) a room
       const err = await joinWithCode(trimmedCode, trimmedName, maxPeople)
       if (err) {
         if (/invalid api key/i.test(err)) {
@@ -60,14 +56,29 @@ export function JoinScreen() {
         } else {
           setError(err)
         }
-      } else {
-        const url = new URL(window.location.href)
-        url.searchParams.delete('code')
-        window.history.replaceState({}, '', url.pathname + url.search)
+        return
       }
+      syncCodeInUrl(trimmedCode)
     } finally {
       setBusy(false)
     }
+  }
+
+  // Bookmark / shared link: open ?code=… and rejoin automatically when a name is saved
+  useEffect(() => {
+    if (autoTried.current || busy) return
+    const fromUrl = codeFromUrl()
+    if (!fromUrl || fromUrl.length < 4) return
+    const savedName = (localStorage.getItem('pulse_display_name') ?? '').trim()
+    if (!savedName) return
+    autoTried.current = true
+    void join(savedName, fromUrl)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot auto join from bookmark
+  }, [])
+
+  async function onSubmit(e: FormEvent) {
+    e.preventDefault()
+    await join(displayName.trim() || 'Guest', code.trim())
   }
 
   return (
@@ -75,7 +86,9 @@ export function JoinScreen() {
       <div className="auth-panel">
         <p className="brand">Pulse</p>
         <h1>Enter the same code</h1>
-        <p className="muted">Share one code. The first person to join sets how many people can enter.</p>
+        <p className="muted">
+          Share one code. After you join, bookmark the page — the code stays in the link so you can reopen the room.
+        </p>
 
         <form className="auth-form" onSubmit={(e) => void onSubmit(e)}>
           <label>
@@ -92,7 +105,11 @@ export function JoinScreen() {
             Room code
             <input
               value={code}
-              onChange={(e) => setCode(e.target.value.toUpperCase())}
+              onChange={(e) => {
+                const next = e.target.value.toUpperCase()
+                setCode(next)
+                syncCodeInUrl(next)
+              }}
               placeholder="e.g. BLUE42"
               autoCapitalize="characters"
               autoCorrect="off"
@@ -121,6 +138,7 @@ export function JoinScreen() {
           </p>
 
           {error && <p className="error">{error}</p>}
+          {busy && codeFromUrl() && <p className="muted">Opening room…</p>}
 
           <button type="submit" className="btn primary" disabled={busy}>
             {busy ? 'Joining…' : 'Join chat'}
@@ -129,7 +147,11 @@ export function JoinScreen() {
             type="button"
             className="btn ghost"
             disabled={busy}
-            onClick={() => setCode(randomCode())}
+            onClick={() => {
+              const next = randomCode()
+              setCode(next)
+              syncCodeInUrl(next)
+            }}
           >
             Generate a new code
           </button>
