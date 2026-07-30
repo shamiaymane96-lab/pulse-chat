@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RealtimeChannel } from '@supabase/supabase-js'
-import { supabase } from '../lib/supabase'
+import { supabase, ensureFreshSession } from '../lib/supabase'
 import type { Attachment, Message, Profile, Reaction } from '../lib/types'
 import {
   base64ToFile,
@@ -123,6 +123,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   const [hiddenUnread, setHiddenUnread] = useState(0)
   const [online, setOnline] = useState(navigator.onLine)
   const [rtEpoch, setRtEpoch] = useState(0)
+  const [syncState, setSyncState] = useState<'live' | 'reconnecting' | 'polling'>('reconnecting')
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollerRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
@@ -132,6 +133,9 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   const flushing = useRef(false)
   const messageIdsRef = useRef<string[]>([])
   const reconnectTimer = useRef<number | null>(null)
+  const reconnectAttempt = useRef(0)
+  const syncAliveRef = useRef(false)
+  const lastEventAt = useRef(Date.now())
 
   useEffect(() => {
     messagesRef.current = messages
@@ -301,6 +305,12 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   const sendNow = useCallback(
     async (body: string, file: File | null, replyToId: string | null, clientId: string) => {
       if (!user) return
+
+      try {
+        await ensureFreshSession()
+      } catch (err) {
+        throw new Error(err instanceof Error ? err.message : 'Session expired — reopen the app')
+      }
 
       setMessages((prev) =>
         prev.map((m) =>
@@ -491,6 +501,46 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
     }
   }, [conversationId, sendNow, user])
 
+  const reloadFromServer = useCallback(async () => {
+    if (!user) return false
+    try {
+      await ensureFreshSession()
+      const { data: member } = await supabase
+        .from('participants')
+        .select('user_id')
+        .eq('conversation_id', conversationId)
+        .eq('user_id', user.id)
+        .maybeSingle()
+      if (!member) {
+        setError('You were removed from this room (connection timed out). Leave and rejoin with the code.')
+        return false
+      }
+
+      const { data: rows, error: err } = await supabase
+        .from('messages')
+        .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id, client_id')
+        .eq('conversation_id', conversationId)
+        .order('created_at', { ascending: true })
+        .limit(300)
+      if (err) {
+        setError(err.message)
+        return false
+      }
+      const enriched = await enrichMessages((rows as Message[]) ?? [])
+      setMessages((prev) => {
+        const locals = prev.filter(
+          (m) => m.localStatus === 'pending' || m.localStatus === 'failed' || m.localStatus === 'uploading',
+        )
+        return mergeServerWithLocals(enriched, locals)
+      })
+      await refreshParticipants()
+      return true
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Sync failed')
+      return false
+    }
+  }, [conversationId, enrichMessages, refreshParticipants, user])
+
   useEffect(() => {
     if (!user) return
     let cancelled = false
@@ -498,6 +548,11 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
     async function bootstrap() {
       setLoading(true)
       setError(null)
+      try {
+        await ensureFreshSession()
+      } catch {
+        /* continue */
+      }
       await refreshParticipants()
 
       const { data: rows, error: err } = await supabase
@@ -544,27 +599,74 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   }
 
   useEffect(() => {
+    if (!user) return
+
+    const recover = async (forceReconnect: boolean) => {
+      setOnline(navigator.onLine)
+      if (!navigator.onLine) return
+      try {
+        await ensureFreshSession()
+      } catch {
+        /* ignore */
+      }
+      const ok = await reloadFromServer()
+      if (ok) {
+        setError(null)
+        void markSeen()
+        void flushOutbox()
+      }
+      if (forceReconnect || !syncAliveRef.current) {
+        setSyncState('reconnecting')
+        setRtEpoch((n) => n + 1)
+      }
+    }
+
     const onVis = () => {
       if (document.visibilityState === 'visible') {
         setHiddenUnread(0)
         document.title = baseTitle.current
-        void markSeen()
+        void recover(true)
       }
     }
     const onOnline = () => {
-      setOnline(true)
-      void flushOutbox()
+      void recover(true)
     }
-    const onOffline = () => setOnline(false)
+    const onOffline = () => {
+      setOnline(false)
+      setSyncState('polling')
+      syncAliveRef.current = false
+    }
+
     document.addEventListener('visibilitychange', onVis)
     window.addEventListener('online', onOnline)
     window.addEventListener('offline', onOffline)
+
+    let tick = 0
+    const pollId = window.setInterval(() => {
+      if (document.visibilityState !== 'visible' || !navigator.onLine) return
+      tick += 1
+      const stale = Date.now() - lastEventAt.current > 25_000
+      if (!syncAliveRef.current || stale) {
+        setSyncState((s) => (s === 'live' ? 'polling' : s))
+        void reloadFromServer().then((ok) => {
+          if (ok) {
+            void flushOutbox()
+            if (!syncAliveRef.current) setRtEpoch((n) => n + 1)
+          }
+        })
+      } else if (tick % 3 === 0) {
+        // Gentle catch-up while realtime looks healthy (~15s)
+        void reloadFromServer()
+      }
+    }, 5000)
+
     return () => {
       document.removeEventListener('visibilitychange', onVis)
       window.removeEventListener('online', onOnline)
       window.removeEventListener('offline', onOffline)
+      window.clearInterval(pollId)
     }
-  }, [flushOutbox, markSeen])
+  }, [flushOutbox, markSeen, reloadFromServer, user])
 
   useEffect(() => {
     if (hiddenUnread > 0 && document.visibilityState === 'hidden') {
@@ -576,27 +678,41 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
 
   useEffect(() => {
     if (!user) return
+    let cancelled = false
+    const topic = `room:${conversationId}:${rtEpoch}`
 
-    const channel = supabase.channel(`room:${conversationId}`, {
+    setSyncState('reconnecting')
+    syncAliveRef.current = false
+
+    const channel = supabase.channel(topic, {
       config: { presence: { key: user.id } },
     })
+
+    const noteEvent = () => {
+      lastEventAt.current = Date.now()
+    }
 
     channel
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${conversationId}` },
         (payload) => {
+          noteEvent()
           const msg = payload.new as Message & { client_id?: string | null }
           void (async () => {
-            await new Promise((r) => window.setTimeout(r, 350))
-            // Reconcile optimistic bubble via client_id when this is our own echo
+            await new Promise((r) => window.setTimeout(r, 200))
             if (msg.sender_id === user.id && msg.client_id) {
               setMessages((prev) => {
                 const hasLocal = prev.some((m) => m.clientId === msg.client_id || m.id === msg.id)
                 if (hasLocal) {
                   return prev.map((m) =>
                     m.clientId === msg.client_id || m.id === msg.id
-                      ? { ...m, id: msg.id, clientId: msg.client_id ?? m.clientId, localStatus: m.localStatus === 'sent' ? 'sent' : m.localStatus }
+                      ? {
+                          ...m,
+                          id: msg.id,
+                          clientId: msg.client_id ?? m.clientId,
+                          localStatus: m.localStatus === 'sent' ? 'sent' : m.localStatus,
+                        }
                       : m,
                   )
                 }
@@ -617,6 +733,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'messages', filter: `conversation_id=eq.${conversationId}` },
         (payload) => {
+          noteEvent()
           const msg = payload.new as Message
           setMessages((prev) =>
             prev.map((m) =>
@@ -631,6 +748,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         'postgres_changes',
         { event: '*', schema: 'public', table: 'participants', filter: `conversation_id=eq.${conversationId}` },
         () => {
+          noteEvent()
           void refreshParticipants()
         },
       )
@@ -638,26 +756,22 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         'postgres_changes',
         { event: '*', schema: 'public', table: 'reactions' },
         () => {
+          noteEvent()
           void (async () => {
             const ids = messageIdsRef.current
             if (!ids.length) return
-            const { data } = await supabase
+            const { data, error } = await supabase
               .from('reactions')
               .select('message_id, user_id, emoji')
               .in('message_id', ids)
+            if (error || !data) return
             const byMsg = new Map<string, Reaction[]>()
-            for (const r of data ?? []) {
+            for (const r of data) {
               const list = byMsg.get(r.message_id) ?? []
               list.push(r)
               byMsg.set(r.message_id, list)
             }
-            setMessages((prev) =>
-              prev.map((m) => ({
-                ...m,
-                // Always replace from fetch so removed reactions clear for peers
-                reactions: byMsg.get(m.id) ?? [],
-              })),
-            )
+            setMessages((prev) => prev.map((m) => ({ ...m, reactions: byMsg.get(m.id) ?? [] })))
           })()
         },
       )
@@ -665,7 +779,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         'postgres_changes',
         { event: 'DELETE', schema: 'public', table: 'messages', filter: `conversation_id=eq.${conversationId}` },
         () => {
-          // bulk clears arrive as deletes; reload and keep local outbox bubbles
+          noteEvent()
           void (async () => {
             const { data: rows } = await supabase
               .from('messages')
@@ -675,7 +789,6 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
             const enriched = await enrichMessages((rows as Message[]) ?? [])
             setMessages((prev) => {
               const hadServer = prev.some((m) => !m.localStatus || m.localStatus === 'sent')
-              // Peer/local clear wiped the room — drop queued sends so they don't resurrect
               if (hadServer && enriched.length === 0) {
                 clearOutboxForConversation(conversationId)
                 return []
@@ -690,49 +803,53 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         },
       )
       .on('presence', { event: 'sync' }, () => {
+        noteEvent()
         const state = channel.presenceState<{ typing?: boolean }>()
-        const others = Object.entries(state).filter(([key]) => key !== user.id)
-        setPeerOnline(others.length > 0)
-        setPeerTyping(others.some(([, metas]) => metas.some((m) => m.typing)))
+        const othersPresent = Object.entries(state).filter(([key]) => key !== user.id)
+        setPeerOnline(othersPresent.length > 0)
+        setPeerTyping(othersPresent.some(([, metas]) => metas.some((m) => m.typing)))
       })
       .subscribe(async (status) => {
+        if (cancelled) return
         if (status === 'SUBSCRIBED') {
-          await channel.track({ typing: false, online_at: new Date().toISOString() })
-          // Catch up after reconnect
-          void refreshParticipants()
-          void (async () => {
-            const { data: rows } = await supabase
-              .from('messages')
-              .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id, client_id')
-              .eq('conversation_id', conversationId)
-              .order('created_at', { ascending: true })
-              .limit(300)
-            if (!rows) return
-            const enriched = await enrichMessages(rows as Message[])
-            setMessages((prev) => {
-              const locals = prev.filter(
-                (m) => m.localStatus === 'pending' || m.localStatus === 'failed' || m.localStatus === 'uploading',
-              )
-              return mergeServerWithLocals(enriched, locals)
-            })
-            void markSeen()
-            void flushOutbox()
-          })()
+          reconnectAttempt.current = 0
+          syncAliveRef.current = true
+          lastEventAt.current = Date.now()
+          setSyncState('live')
+          try {
+            await channel.track({ typing: false, online_at: new Date().toISOString() })
+          } catch {
+            /* ignore */
+          }
+          void reloadFromServer().then((ok) => {
+            if (ok) {
+              void markSeen()
+              void flushOutbox()
+            }
+          })
           return
         }
-        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          syncAliveRef.current = false
+          setSyncState('reconnecting')
+          if (cancelled) return
           if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current)
+          const attempt = reconnectAttempt.current
+          reconnectAttempt.current = attempt + 1
+          const delay = Math.min(15_000, 1000 * 2 ** Math.min(attempt, 4))
           reconnectTimer.current = window.setTimeout(() => {
-            setRtEpoch((n) => n + 1)
-          }, 2000)
+            if (!cancelled) setRtEpoch((n) => n + 1)
+          }, delay)
         }
       })
 
     channelRef.current = channel
     return () => {
+      cancelled = true
+      syncAliveRef.current = false
       if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current)
       void supabase.removeChannel(channel)
-      channelRef.current = null
+      if (channelRef.current === channel) channelRef.current = null
     }
   }, [
     conversationId,
@@ -741,6 +858,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
     markSeen,
     onActivity,
     refreshParticipants,
+    reloadFromServer,
     rtEpoch,
     upsertMessage,
     user,
@@ -808,22 +926,25 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         <div className="chat-header-main">
           <strong>{title}</strong>
           <p className="muted status-line">
-            {!online ? 'Offline · queued sends' : ''}
-            {online && waitingForPeer
-              ? `Only you · ${peerCount}/${maxParticipants}`
-              : online && peerTyping
-                ? 'typing…'
-                : online && peerOnline
-                  ? isGroup
-                    ? `online · ${peerCount}/${maxParticipants}`
-                    : 'online'
-                  : online && other
-                    ? 'last seen recently'
-                    : online
-                      ? isGroup
-                        ? `${peerCount}/${maxParticipants}`
-                        : ' '
-                      : ''}
+            {!online
+              ? 'Offline · queued sends'
+              : syncState === 'reconnecting'
+                ? 'Reconnecting…'
+                : syncState === 'polling'
+                  ? 'Syncing…'
+                  : waitingForPeer
+                    ? `Only you · ${peerCount}/${maxParticipants}`
+                    : peerTyping
+                      ? 'typing…'
+                      : peerOnline
+                        ? isGroup
+                          ? `online · ${peerCount}/${maxParticipants}`
+                          : 'online'
+                        : other
+                          ? 'last seen recently'
+                          : isGroup
+                            ? `${peerCount}/${maxParticipants}`
+                            : ' '}
           </p>
         </div>
         <div className="header-actions">

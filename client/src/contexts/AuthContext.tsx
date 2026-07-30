@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from 'react'
 import type { Session, User } from '@supabase/supabase-js'
-import { supabase } from '../lib/supabase'
+import { ensureFreshSession, supabase } from '../lib/supabase'
 import { clearOutboxForConversation } from '../lib/outbox'
 import type { Profile } from '../lib/types'
 
@@ -117,9 +117,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         .eq('id', session.user.id)
     }
     tick()
-    const id = window.setInterval(tick, 60_000)
+    const id = window.setInterval(tick, 30_000)
     const onVisible = () => {
-      if (document.visibilityState === 'visible') tick()
+      if (document.visibilityState === 'visible') {
+        void ensureFreshSession().catch(() => undefined)
+        tick()
+      }
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => {
