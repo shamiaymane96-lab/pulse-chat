@@ -1,3 +1,5 @@
+import { useEffect } from 'react'
+
 type Props = {
   src: string
   alt?: string
@@ -5,6 +7,19 @@ type Props = {
 }
 
 export function ImageLightbox({ src, alt, onClose }: Props) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prev
+    }
+  }, [onClose])
+
   return (
     <div className="lightbox-backdrop" onClick={onClose} role="presentation">
       <div className="lightbox" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>

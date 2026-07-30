@@ -218,12 +218,14 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
     setOthers(peerProfiles)
     setOther(peerProfiles[0] ?? null)
 
-    // For receipts: use the earliest last_read among peers (all must have read for "seen" in groups)
-    // For 1:1 keep single peer; for groups mark seen when message.seen_at is set by RPC
-    const reads = peerRows.map((p) => p.last_read_at as string | null).filter(Boolean) as string[]
-    if (reads.length === 0) setPeerLastRead(null)
-    else if (peerProfiles.length <= 1) setPeerLastRead(reads[0] ?? null)
-    else setPeerLastRead(reads.sort()[0] ?? null)
+    // Receipts: require every peer to have a real last_read_at (null = never opened chat)
+    const peerRowsAll = peerRows
+    const reads = peerRowsAll.map((p) => p.last_read_at as string | null)
+    if (reads.length === 0 || reads.some((r) => !r)) {
+      setPeerLastRead(null)
+    } else {
+      setPeerLastRead([...reads].sort()[0] as string)
+    }
   }, [conversationId, user])
 
   const markSeen = useCallback(async () => {
@@ -234,7 +236,12 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
 
   const upsertMessage = useCallback((incoming: Message) => {
     setMessages((prev) => {
-      const withoutDup = prev.filter((m) => m.id !== incoming.id && m.clientId !== incoming.clientId)
+      const withoutDup = prev.filter((m) => {
+        if (m.id === incoming.id) return false
+        if (incoming.clientId && (m.clientId === incoming.clientId || m.id === incoming.clientId)) return false
+        if (m.clientId && m.clientId === incoming.id) return false
+        return true
+      })
       return [...withoutDup, incoming].sort((a, b) => a.created_at.localeCompare(b.created_at))
     })
   }, [])
@@ -285,18 +292,32 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         ),
       )
 
-      const { data: inserted, error: insertErr } = await supabase
+      let inserted: Message | null = null
+      const { data: created, error: insertErr } = await supabase
         .from('messages')
         .insert({
           conversation_id: conversationId,
           sender_id: user.id,
           body: body || (file ? file.name : null),
           reply_to_id: replyToId,
+          client_id: clientId,
         })
-        .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id')
+        .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id, client_id')
         .single()
 
-      if (insertErr || !inserted) throw new Error(insertErr?.message ?? 'Failed to send')
+      if (insertErr || !created) {
+        // Idempotent retry after partial success / multi-tab race
+        const { data: existing } = await supabase
+          .from('messages')
+          .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id, client_id')
+          .eq('conversation_id', conversationId)
+          .eq('client_id', clientId)
+          .maybeSingle()
+        if (!existing) throw new Error(insertErr?.message ?? 'Failed to send')
+        inserted = existing as Message
+      } else {
+        inserted = created as Message
+      }
 
       if (file) {
         setMessages((prev) =>
@@ -304,32 +325,39 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         )
         const safeName = file.name.replace(/[^\w.\-]+/g, '_')
         const path = `${conversationId}/${inserted.id}/${safeName}`
-        const { error: upErr } = await supabase.storage.from('chat-files').upload(path, file, {
-          contentType: file.type || 'application/octet-stream',
-          upsert: false,
-        })
-        if (upErr) {
-          await supabase.from('messages').delete().eq('id', inserted.id)
-          throw new Error(upErr.message)
-        }
-        const { error: attErr } = await supabase.from('attachments').insert({
-          message_id: inserted.id,
-          storage_path: path,
-          mime_type: file.type || 'application/octet-stream',
-          size_bytes: file.size,
-          file_name: file.name,
-        })
-        if (attErr) {
-          await supabase.from('messages').delete().eq('id', inserted.id)
-          throw new Error(attErr.message)
+        const { data: existingAtt } = await supabase
+          .from('attachments')
+          .select('id')
+          .eq('message_id', inserted.id)
+          .maybeSingle()
+        if (!existingAtt) {
+          const { error: upErr } = await supabase.storage.from('chat-files').upload(path, file, {
+            contentType: file.type || 'application/octet-stream',
+            upsert: true,
+          })
+          if (upErr) {
+            await supabase.from('messages').delete().eq('id', inserted.id)
+            throw new Error(upErr.message)
+          }
+          const { error: attErr } = await supabase.from('attachments').insert({
+            message_id: inserted.id,
+            storage_path: path,
+            mime_type: file.type || 'application/octet-stream',
+            size_bytes: file.size,
+            file_name: file.name,
+          })
+          if (attErr) {
+            await supabase.from('messages').delete().eq('id', inserted.id)
+            throw new Error(attErr.message)
+          }
         }
       }
 
-      const [enriched] = await enrichMessages([inserted as Message])
+      const [enriched] = await enrichMessages([inserted])
       removeOutbox(clientId)
       setMessages((prev) => {
         const withoutLocal = prev.filter((m) => m.clientId !== clientId && m.id !== enriched.id)
-        const next: Message = { ...enriched, localStatus: 'sent', localProgress: 100 }
+        const next: Message = { ...enriched, clientId, localStatus: 'sent', localProgress: 100 }
         return [...withoutLocal, next].sort((a, b) => a.created_at.localeCompare(b.created_at))
       })
       onActivity()
@@ -448,7 +476,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
 
       const { data: rows, error: err } = await supabase
         .from('messages')
-        .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id')
+        .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id, client_id')
         .eq('conversation_id', conversationId)
         .order('created_at', { ascending: true })
         .limit(300)
@@ -467,9 +495,9 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
       if (!cancelled) {
         setMessages(mergeServerWithLocals(enriched, pendingLocal))
         setLoading(false)
+        await markSeen()
+        void flushOutbox()
       }
-      await markSeen()
-      void flushOutbox()
     }
 
     void bootstrap()
@@ -525,12 +553,25 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${conversationId}` },
         (payload) => {
-          const msg = payload.new as Message
+          const msg = payload.new as Message & { client_id?: string | null }
           void (async () => {
-            // Own inserts still matter for multi-tab; skip receipt/unread for self
             await new Promise((r) => window.setTimeout(r, 350))
+            // Reconcile optimistic bubble via client_id when this is our own echo
+            if (msg.sender_id === user.id && msg.client_id) {
+              setMessages((prev) => {
+                const hasLocal = prev.some((m) => m.clientId === msg.client_id || m.id === msg.id)
+                if (hasLocal) {
+                  return prev.map((m) =>
+                    m.clientId === msg.client_id || m.id === msg.id
+                      ? { ...m, id: msg.id, clientId: msg.client_id ?? m.clientId, localStatus: m.localStatus === 'sent' ? 'sent' : m.localStatus }
+                      : m,
+                  )
+                }
+                return prev
+              })
+            }
             const [enriched] = await enrichMessages([msg])
-            upsertMessage(enriched)
+            upsertMessage({ ...enriched, clientId: msg.client_id ?? undefined })
             if (msg.sender_id === user.id) return
             await supabase.rpc('mark_message_delivered', { p_message_id: msg.id })
             if (document.visibilityState === 'hidden') setHiddenUnread((n) => n + 1)
@@ -595,7 +636,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
           void (async () => {
             const { data: rows } = await supabase
               .from('messages')
-              .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id')
+              .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id, client_id')
               .eq('conversation_id', conversationId)
               .order('created_at', { ascending: true })
             const enriched = await enrichMessages((rows as Message[]) ?? [])
@@ -678,6 +719,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
     if (m.localStatus === 'failed') return 'Failed — will retry'
     if (m.localStatus === 'uploading') return `Uploading ${m.localProgress ?? 0}%`
     if (m.localStatus === 'pending') return online ? 'Sending…' : 'Waiting for network'
+    // Prefer peer last_read (accurate for groups); seen_at is only set when all peers have read
     if (m.seen_at || (peerLastRead && peerLastRead >= m.created_at)) return 'Seen'
     if (m.delivered_at) return 'Delivered'
     return 'Sent'

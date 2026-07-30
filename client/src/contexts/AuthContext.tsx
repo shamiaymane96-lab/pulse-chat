@@ -67,17 +67,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let mounted = true
 
-    supabase.auth.getSession().then(({ data }) => {
+    async function boot() {
+      const { data } = await supabase.auth.getSession()
       if (!mounted) return
       setSession(data.session)
-      if (data.session?.user) {
-        void loadProfile(data.session.user.id).finally(() => {
-          if (mounted) setLoading(false)
-        })
-      } else {
-        setLoading(false)
+
+      const roomId = localStorage.getItem(ROOM_KEY)
+      if (data.session?.user && roomId) {
+        const { data: membership } = await supabase
+          .from('participants')
+          .select('user_id')
+          .eq('conversation_id', roomId)
+          .eq('user_id', data.session.user.id)
+          .maybeSingle()
+        if (!membership) {
+          localStorage.removeItem(ROOM_KEY)
+          localStorage.removeItem(CODE_KEY)
+          setActiveRoomId(null)
+          setActiveCode(null)
+        }
       }
-    })
+
+      if (data.session?.user) {
+        await loadProfile(data.session.user.id)
+      }
+      if (mounted) setLoading(false)
+    }
+
+    void boot()
 
     const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
       setSession(next)
@@ -101,7 +118,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     tick()
     const id = window.setInterval(tick, 60_000)
-    return () => window.clearInterval(id)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') tick()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearInterval(id)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [session?.user?.id])
 
   const joinWithCode = useCallback(async (code: string, displayName: string, maxParticipants?: number) => {
@@ -140,10 +164,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const leave = useCallback(async () => {
     const roomId = localStorage.getItem(ROOM_KEY)
     if (roomId) {
-      try {
-        await supabase.rpc('leave_room', { p_conversation_id: roomId })
-      } catch {
-        /* ignore */
+      const { error } = await supabase.rpc('leave_room', { p_conversation_id: roomId })
+      if (error) {
+        // Still clear local UI so the user isn't stuck, but surface failure
+        console.error('leave_room failed', error.message)
       }
       clearOutboxForConversation(roomId)
     }

@@ -15,6 +15,24 @@ function Shell() {
   }, [activeRoomId])
 
   useEffect(() => {
+    const root = document.documentElement
+    const vv = window.visualViewport
+    const apply = () => {
+      const h = vv?.height ?? window.innerHeight
+      root.style.setProperty('--app-height', `${Math.round(h)}px`)
+    }
+    apply()
+    vv?.addEventListener('resize', apply)
+    vv?.addEventListener('scroll', apply)
+    window.addEventListener('resize', apply)
+    return () => {
+      vv?.removeEventListener('resize', apply)
+      vv?.removeEventListener('scroll', apply)
+      window.removeEventListener('resize', apply)
+    }
+  }, [])
+
+  useEffect(() => {
     if (!user) return
     void registerPushSubscription(user.id, async (payload) => {
       await supabase.from('push_subscriptions').upsert(

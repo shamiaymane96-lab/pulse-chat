@@ -40,6 +40,12 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
   const recordTimerRef = useRef<number | null>(null)
   const recordStartedAt = useRef(0)
   const cancelRecordRef = useRef(false)
+  const holdActiveRef = useRef(false)
+  const replyToIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    replyToIdRef.current = replyTo?.id ?? null
+  }, [replyTo])
 
   useEffect(() => {
     return () => {
@@ -93,9 +99,16 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
     if (disabled || busy || recording) return
     setMicError(null)
     cancelRecordRef.current = false
+    holdActiveRef.current = true
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      // Finger released while waiting for mic permission — don't start a stuck recording
+      if (!holdActiveRef.current) {
+        stream.getTracks().forEach((t) => t.stop())
+        return
+      }
+
       streamRef.current = stream
       const mimeType = pickRecorderMime()
       const recorder = mimeType
@@ -129,10 +142,11 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
 
         const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm'
         const voice = new File([blob], `voice-${Date.now()}.${ext}`, { type })
+        const replyId = replyToIdRef.current
         void (async () => {
           setBusy(true)
           try {
-            await onSend('Voice note', voice, replyTo?.id ?? null)
+            await onSend('Voice note', voice, replyId)
             onTyping(false)
             onCancelReply?.()
           } finally {
@@ -148,23 +162,30 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
       recordTimerRef.current = window.setInterval(() => {
         setRecordSecs(Math.floor((Date.now() - recordStartedAt.current) / 1000))
       }, 250)
-      e.currentTarget.setPointerCapture(e.pointerId)
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId)
+      } catch {
+        /* capture may fail if pointer already up */
+      }
     } catch {
+      holdActiveRef.current = false
       setMicError('Microphone permission is required for voice notes')
     }
   }
 
   function stopRecording(e: PointerEvent<HTMLButtonElement>) {
-    if (!recording) return
     e.preventDefault()
+    holdActiveRef.current = false
+    if (!recorderRef.current) return
     const elapsed = Date.now() - recordStartedAt.current
     if (elapsed < 350) cancelRecordRef.current = true
-    recorderRef.current?.stop()
+    recorderRef.current.stop()
     recorderRef.current = null
   }
 
   function cancelRecording() {
     cancelRecordRef.current = true
+    holdActiveRef.current = false
     recorderRef.current?.stop()
     recorderRef.current = null
   }
