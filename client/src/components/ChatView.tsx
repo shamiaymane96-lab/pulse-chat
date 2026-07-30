@@ -949,6 +949,14 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
           </p>
         </div>
         <div className="header-actions">
+          <button
+            type="button"
+            className="btn ghost icon-btn"
+            title="Refresh app"
+            onClick={() => void hardRefreshApp()}
+          >
+            Refresh
+          </button>
           {roomCode && (
             <button type="button" className="btn ghost icon-btn header-primary-action" onClick={() => void shareCode()}>
               Share
@@ -1000,16 +1008,6 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
                     }}
                   >
                     New code
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setHeaderMenuOpen(false)
-                      void hardRefreshApp()
-                    }}
-                  >
-                    Refresh app
                   </button>
                 </div>
               </>

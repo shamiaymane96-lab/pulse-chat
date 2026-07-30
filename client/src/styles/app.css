@@ -394,6 +394,9 @@ code {
   padding: 0.65rem 0.8rem 0.45rem;
   border-radius: 16px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .bubble.mine {
@@ -430,6 +433,11 @@ code {
 
 .attachment {
   margin-top: 0.35rem;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+  margin-top: 0.35rem;
 }
 
 .attachment img {
@@ -441,7 +449,10 @@ code {
 
 .file-link {
   color: #ccfbf1;
-  word-break: break-all;
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .composer {
@@ -488,7 +499,7 @@ code {
 }
 
 .file-chip {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 0.4rem;
   background: var(--bg-soft);
@@ -496,10 +507,15 @@ code {
   border-radius: 999px;
   padding: 0.2rem 0.55rem;
   font-size: 0.82rem;
+  width: 100%;
   max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .file-chip span {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -510,6 +526,7 @@ code {
   background: transparent;
   color: var(--muted);
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .recording-bar {
@@ -564,9 +581,17 @@ code {
 
 .header-actions {
   display: flex;
-  gap: 0.35rem;
+  gap: 0.25rem;
   flex-shrink: 0;
   align-items: center;
+  max-width: 55%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.header-actions .icon-btn {
+  min-width: 0;
+  padding: 0.4rem 0.55rem;
 }
 
 .header-menu-wrap {
@@ -643,7 +668,7 @@ code {
 
 .reply-chip,
 .file-chip {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 0.4rem;
   background: var(--bg-soft);
@@ -651,11 +676,16 @@ code {
   border-radius: 999px;
   padding: 0.2rem 0.55rem;
   font-size: 0.82rem;
+  width: 100%;
   max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .reply-chip span,
 .file-chip span {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -667,6 +697,7 @@ code {
   background: transparent;
   color: var(--muted);
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .reply-quote {

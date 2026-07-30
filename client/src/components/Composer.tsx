@@ -243,7 +243,7 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
         ) : (
           <>
             {file && (
-              <div className="file-chip">
+              <div className="file-chip" title={file.name}>
                 <span>{file.name}</span>
                 <button type="button" onClick={() => setFile(null)} aria-label="Remove file">
                   ×
