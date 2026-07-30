@@ -30,6 +30,8 @@ export type Message = {
   created_at: string
   delivered_at: string | null
   seen_at?: string | null
+  edited_at?: string | null
+  deleted_at?: string | null
   reply_to_id?: string | null
   attachments?: Attachment[]
   reactions?: Reaction[]

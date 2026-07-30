@@ -226,9 +226,21 @@ code {
 }
 
 .chat-view {
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   height: 100%;
   max-height: 100%;
+  position: relative;
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.2), transparent 30%),
+    repeating-linear-gradient(
+      -12deg,
+      transparent,
+      transparent 11px,
+      rgba(148, 163, 184, 0.03) 11px,
+      rgba(148, 163, 184, 0.03) 12px
+    );
 }
 
 .chat-header {
@@ -241,19 +253,23 @@ code {
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
 }
-.chat-view {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  min-height: 0;
-  background:
-    linear-gradient(180deg, rgba(15, 23, 42, 0.2), transparent 30%),
-    repeating-linear-gradient(
-      -12deg,
-      transparent,
-      transparent 11px,
-      rgba(148, 163, 184, 0.03) 11px,
-      rgba(148, 163, 184, 0.03) 12px
-    );
+
+.chat-header-main {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+
+.chat-header-main strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-header .back {
@@ -274,6 +290,7 @@ code {
   flex-direction: column;
   gap: 0.55rem;
   min-height: 0;
+  flex: 1;
 }
 
 .bubble-row {
@@ -459,10 +476,6 @@ code {
   margin-top: 0.2rem;
 }
 
-.chat-header-main {
-  flex: 1;
-  min-width: 0;
-}
 
 .header-actions {
   display: flex;
@@ -549,6 +562,10 @@ code {
   justify-content: center;
   gap: 0.55rem;
   flex-wrap: wrap;
+}
+
+.edit-chip {
+  border-color: rgba(45, 212, 191, 0.45);
 }
 
 .reply-chip,
@@ -681,6 +698,221 @@ code {
   outline: 1px solid rgba(251, 113, 133, 0.55);
 }
 
+.chat-search-bar {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  background: rgba(8, 12, 22, 0.9);
+  flex-shrink: 0;
+}
+
+.chat-search-bar input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-soft);
+  color: var(--text);
+  padding: 0.55rem 0.75rem;
+}
+
+.pin-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  text-align: left;
+  border: 1px solid rgba(45, 212, 191, 0.35);
+  background: rgba(15, 118, 110, 0.22);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 0.55rem 0.7rem;
+  cursor: pointer;
+  margin-bottom: 0.25rem;
+}
+
+.pin-banner-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
+
+.pin-banner-close {
+  flex-shrink: 0;
+  opacity: 0.75;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.unread-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.35rem 0 0.55rem;
+  color: var(--brand);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.unread-divider::before,
+.unread-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: rgba(45, 212, 191, 0.35);
+}
+
+.unread-divider span {
+  flex-shrink: 0;
+}
+
+.bubble-row.search-dimmed {
+  opacity: 0.35;
+}
+
+.search-hit {
+  background: rgba(250, 204, 21, 0.35);
+  border-radius: 2px;
+}
+
+.deleted-msg {
+  opacity: 0.7;
+}
+
+.edited-label {
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.jump-fab {
+  position: absolute;
+  right: 1rem;
+  bottom: calc(5.5rem + env(safe-area-inset-bottom, 0px));
+  z-index: 8;
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(8, 12, 22, 0.92);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.peers-panel {
+  position: absolute;
+  left: 0.75rem;
+  right: 0.75rem;
+  top: calc(4.2rem + env(safe-area-inset-top, 0px));
+  z-index: 25;
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 0.75rem 0.9rem 0.9rem;
+  max-height: min(50vh, 320px);
+  overflow: auto;
+}
+
+.peers-panel ul {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.peers-panel li {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.9rem;
+}
+
+.peer-online {
+  color: var(--brand);
+  font-size: 0.8rem;
+}
+
+.peer-offline {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  background: rgba(2, 6, 23, 0.55);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0.75rem;
+  padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
+}
+
+.action-sheet {
+  width: min(420px, 100%);
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  padding: 0.85rem 0.85rem 0.65rem;
+}
+
+.sheet-title {
+  margin: 0 0 0.55rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.sheet-reactions {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.35rem;
+  margin-bottom: 0.55rem;
+}
+
+.sheet-reactions button {
+  flex: 1;
+  border: 0;
+  background: var(--bg-soft);
+  border-radius: 12px;
+  font-size: 1.25rem;
+  padding: 0.45rem 0;
+  cursor: pointer;
+}
+
+.sheet-actions {
+  display: grid;
+}
+
+.sheet-actions button {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 0.75rem 0.35rem;
+  border-top: 1px solid var(--line);
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+
+.sheet-actions button.danger {
+  color: var(--danger);
+}
+
+.sheet-actions button.muted-action {
+  color: var(--muted);
+}
+
 .lightbox-backdrop {
   position: fixed;
   inset: 0;
@@ -763,9 +995,16 @@ code {
     display: grid;
   }
 
-  .app-shell.single-chat,
-  .app-shell.single-chat .chat-view {
+  .app-shell.single-chat {
     display: grid;
+    height: 100%;
+    height: var(--app-height, 100dvh);
+    max-height: var(--app-height, 100dvh);
+  }
+
+  .app-shell.single-chat .chat-view {
+    display: flex;
+    flex-direction: column;
     height: 100%;
     height: var(--app-height, 100dvh);
     max-height: var(--app-height, 100dvh);

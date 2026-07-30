@@ -4,9 +4,12 @@ import type { Message } from '../lib/types'
 type Props = {
   disabled?: boolean
   replyTo?: Message | null
+  editing?: Message | null
   onCancelReply?: () => void
+  onCancelEdit?: () => void
   onSend: (body: string, file: File | null, replyToId: string | null) => Promise<void>
   onTyping: (typing: boolean) => void
+  onRecording?: (recording: boolean) => void
 }
 
 function pickRecorderMime() {
@@ -22,7 +25,16 @@ function pickRecorderMime() {
   return ''
 }
 
-export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }: Props) {
+export function Composer({
+  disabled,
+  replyTo,
+  editing,
+  onCancelReply,
+  onCancelEdit,
+  onSend,
+  onTyping,
+  onRecording,
+}: Props) {
   const [text, setText] = useState('')
   const [file, setFile] = useState<File | null>(null)
   const [busy, setBusy] = useState(false)
@@ -42,27 +54,41 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
   const cancelRecordRef = useRef(false)
   const holdActiveRef = useRef(false)
   const replyToIdRef = useRef<string | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     replyToIdRef.current = replyTo?.id ?? null
   }, [replyTo])
 
   useEffect(() => {
+    if (editing) {
+      setText(editing.body ?? '')
+      setFile(null)
+      onCancelReply?.()
+      window.setTimeout(() => inputRef.current?.focus(), 50)
+    }
+  }, [editing, onCancelReply])
+
+  useEffect(() => {
     return () => {
       if (typingTimer.current) window.clearTimeout(typingTimer.current)
       if (recordTimerRef.current) window.clearInterval(recordTimerRef.current)
       streamRef.current?.getTracks().forEach((t) => t.stop())
+      onRecording?.(false)
     }
-  }, [])
+  }, [onRecording])
 
   function handleChange(value: string) {
     setText(value)
-    onTyping(true)
-    if (typingTimer.current) window.clearTimeout(typingTimer.current)
-    typingTimer.current = window.setTimeout(() => onTyping(false), 1200)
+    if (!editing) {
+      onTyping(true)
+      if (typingTimer.current) window.clearTimeout(typingTimer.current)
+      typingTimer.current = window.setTimeout(() => onTyping(false), 1200)
+    }
   }
 
   function takeFile(next: File | null, input?: HTMLInputElement | null) {
+    if (editing) return
     if (next && next.size > 50 * 1024 * 1024) {
       alert('File must be 50MB or smaller')
       if (input) input.value = ''
@@ -79,9 +105,10 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
     e.preventDefault()
     const body = text.trim()
     if (!body && !file) return
+    if (editing && !body) return
     setBusy(true)
     try {
-      await onSend(body, file, replyTo?.id ?? null)
+      await onSend(body, editing ? null : file, editing ? null : replyTo?.id ?? null)
       setText('')
       setFile(null)
       if (fileRef.current) fileRef.current.value = ''
@@ -89,6 +116,7 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
       if (cameraRef.current) cameraRef.current.value = ''
       onTyping(false)
       onCancelReply?.()
+      onCancelEdit?.()
     } finally {
       setBusy(false)
     }
@@ -96,14 +124,13 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
 
   async function startRecording(e: PointerEvent<HTMLButtonElement>) {
     e.preventDefault()
-    if (disabled || busy || recording) return
+    if (disabled || busy || recording || editing) return
     setMicError(null)
     cancelRecordRef.current = false
     holdActiveRef.current = true
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      // Finger released while waiting for mic permission — don't start a stuck recording
       if (!holdActiveRef.current) {
         stream.getTracks().forEach((t) => t.stop())
         return
@@ -129,6 +156,7 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
           recordTimerRef.current = null
         }
         setRecording(false)
+        onRecording?.(false)
 
         if (cancelRecordRef.current) {
           chunksRef.current = []
@@ -159,13 +187,14 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
       recordStartedAt.current = Date.now()
       setRecordSecs(0)
       setRecording(true)
+      onRecording?.(true)
       recordTimerRef.current = window.setInterval(() => {
         setRecordSecs(Math.floor((Date.now() - recordStartedAt.current) / 1000))
       }, 250)
       try {
         e.currentTarget.setPointerCapture(e.pointerId)
       } catch {
-        /* capture may fail if pointer already up */
+        /* ignore */
       }
     } catch {
       holdActiveRef.current = false
@@ -188,18 +217,21 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
     holdActiveRef.current = false
     recorderRef.current?.stop()
     recorderRef.current = null
+    onRecording?.(false)
   }
+
+  const toolsDisabled = disabled || busy || recording || Boolean(editing)
 
   return (
     <form className="composer" onSubmit={(e) => void submit(e)}>
-      <input ref={fileRef} type="file" className="file-input" onChange={onFile} disabled={disabled || busy || recording} />
+      <input ref={fileRef} type="file" className="file-input" onChange={onFile} disabled={toolsDisabled} />
       <input
         ref={galleryRef}
         type="file"
         accept="image/*,video/*"
         className="file-input"
         onChange={onFile}
-        disabled={disabled || busy || recording}
+        disabled={toolsDisabled}
       />
       <input
         ref={cameraRef}
@@ -208,23 +240,31 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
         capture="environment"
         className="file-input"
         onChange={onFile}
-        disabled={disabled || busy || recording}
+        disabled={toolsDisabled}
       />
 
       <div className="composer-tools">
-        <button type="button" className="btn ghost icon-btn" disabled={disabled || busy || recording} onClick={() => cameraRef.current?.click()}>
+        <button type="button" className="btn ghost icon-btn" disabled={toolsDisabled} onClick={() => cameraRef.current?.click()}>
           Cam
         </button>
-        <button type="button" className="btn ghost icon-btn" disabled={disabled || busy || recording} onClick={() => galleryRef.current?.click()}>
+        <button type="button" className="btn ghost icon-btn" disabled={toolsDisabled} onClick={() => galleryRef.current?.click()}>
           Pic
         </button>
-        <button type="button" className="btn ghost icon-btn" disabled={disabled || busy || recording} onClick={() => fileRef.current?.click()}>
+        <button type="button" className="btn ghost icon-btn" disabled={toolsDisabled} onClick={() => fileRef.current?.click()}>
           File
         </button>
       </div>
 
       <div className="composer-main">
-        {replyTo && (
+        {editing && (
+          <div className="reply-chip edit-chip">
+            <span>Editing message</span>
+            <button type="button" onClick={onCancelEdit} aria-label="Cancel edit">
+              ×
+            </button>
+          </div>
+        )}
+        {replyTo && !editing && (
           <div className="reply-chip">
             <span>Replying: {(replyTo.body || 'Attachment').slice(0, 60)}</span>
             <button type="button" onClick={onCancelReply} aria-label="Cancel reply">
@@ -252,8 +292,9 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
             )}
             {micError && <p className="error composer-error">{micError}</p>}
             <input
+              ref={inputRef}
               className="composer-input"
-              placeholder="Message"
+              placeholder={editing ? 'Edit message' : 'Message'}
               value={text}
               onChange={(e) => handleChange(e.target.value)}
               disabled={disabled || busy}
@@ -262,7 +303,7 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
         )}
       </div>
 
-      {!text.trim() && !file ? (
+      {!text.trim() && !file && !editing ? (
         <button
           type="button"
           className={`btn primary mic-btn ${recording ? 'recording' : ''}`}
@@ -276,8 +317,12 @@ export function Composer({ disabled, replyTo, onCancelReply, onSend, onTyping }:
           {recording ? '…' : 'Mic'}
         </button>
       ) : (
-        <button type="submit" className="btn primary" disabled={disabled || busy || recording}>
-          Send
+        <button
+          type="submit"
+          className="btn primary"
+          disabled={disabled || busy || recording || (Boolean(editing) && !text.trim())}
+        >
+          {editing ? 'Save' : 'Send'}
         </button>
       )}
     </form>

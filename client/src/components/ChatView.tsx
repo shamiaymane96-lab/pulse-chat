@@ -13,6 +13,7 @@ import {
 import { useAuth } from '../contexts/AuthContext'
 import { Composer } from './Composer'
 import { ImageLightbox } from './ImageLightbox'
+import { MessageActionSheet } from './MessageActionSheet'
 import { hardRefreshApp } from '../lib/hardRefresh'
 import { roomLink, syncCodeInUrl } from '../lib/roomLink'
 
@@ -109,6 +110,23 @@ function revokeBlobUrlsFromMessages(msgs: Message[]) {
   }
 }
 
+const MESSAGE_SELECT =
+  'id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id, client_id, edited_at, deleted_at'
+
+type PresencePayload = { typing?: boolean; recording?: boolean; online_at?: string }
+
+function escapeRegex(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function highlightText(text: string, query: string) {
+  if (!query.trim()) return text
+  const parts = text.split(new RegExp(`(${escapeRegex(query)})`, 'gi'))
+  return parts.map((part, i) =>
+    part.toLowerCase() === query.toLowerCase() ? <mark key={i}>{part}</mark> : part,
+  )
+}
+
 export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props) {
   const { user, setRoomCode } = useAuth()
   const [messages, setMessages] = useState<Message[]>([])
@@ -117,15 +135,25 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   const [peerCount, setPeerCount] = useState(1)
   const [maxParticipants, setMaxParticipants] = useState(2)
   const [peerTyping, setPeerTyping] = useState(false)
+  const [peerRecording, setPeerRecording] = useState(false)
   const [peerOnline, setPeerOnline] = useState(false)
+  const [presenceByUser, setPresenceByUser] = useState<Map<string, PresencePayload>>(new Map())
   const [peerLastRead, setPeerLastRead] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [replyTo, setReplyTo] = useState<Message | null>(null)
+  const [editing, setEditing] = useState<Message | null>(null)
+  const [actionSheetMessage, setActionSheetMessage] = useState<Message | null>(null)
   const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null)
   const [menuFor, setMenuFor] = useState<string | null>(null)
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false)
+  const [peersPanelOpen, setPeersPanelOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [stuckToBottom, setStuckToBottom] = useState(true)
+  const [pinnedMessageId, setPinnedMessageId] = useState<string | null>(null)
+  const [unreadDividerId, setUnreadDividerId] = useState<string | null>(null)
   const [hiddenUnread, setHiddenUnread] = useState(0)
   const [online, setOnline] = useState(navigator.onLine)
   const [rtEpoch, setRtEpoch] = useState(0)
@@ -143,6 +171,12 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   const syncAliveRef = useRef(false)
   const lastEventAt = useRef(Date.now())
   const lastReconnectAt = useRef(0)
+  const presenceRef = useRef<PresencePayload>({ typing: false, recording: false })
+  const lastHiddenAt = useRef<string | null>(null)
+  const lastSeenMessageId = useRef<string | null>(null)
+  const longPressTimer = useRef<number | null>(null)
+  const longPressMessageId = useRef<string | null>(null)
+  const unreadDividerTimer = useRef<number | null>(null)
 
   useEffect(() => {
     messagesRef.current = messages
@@ -153,6 +187,8 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
     return () => {
       revokeBlobUrlsFromMessages(messagesRef.current)
       if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current)
+      if (unreadDividerTimer.current) window.clearTimeout(unreadDividerTimer.current)
+      clearLongPress()
     }
   }, [])
 
@@ -184,6 +220,13 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
     const link = roomLink(code)
     return `Join my Pulse chat with code ${code}\n${link}`
   }, [roomCode])
+
+  const pinnedMessage = useMemo(
+    () => (pinnedMessageId ? messages.find((m) => m.id === pinnedMessageId) ?? null : null),
+    [messages, pinnedMessageId],
+  )
+
+  const normalizedSearch = searchQuery.trim().toLowerCase()
 
   useEffect(() => {
     if (roomCode) syncCodeInUrl(roomCode)
@@ -246,12 +289,13 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         .from('participants')
         .select('user_id, last_read_at, profiles(id, username, display_name, avatar_url, last_seen)')
         .eq('conversation_id', conversationId),
-      supabase.from('conversations').select('max_participants').eq('id', conversationId).maybeSingle(),
+      supabase.from('conversations').select('max_participants, pinned_message_id').eq('id', conversationId).maybeSingle(),
     ])
 
     const rows = parts ?? []
     setPeerCount(rows.length)
     if (conv?.max_participants) setMaxParticipants(conv.max_participants)
+    setPinnedMessageId(conv?.pinned_message_id ?? null)
 
     const peerRows = rows.filter((p) => p.user_id !== user.id)
     const peerProfiles = peerRows
@@ -273,6 +317,9 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   const markSeen = useCallback(async () => {
     if (!user || document.visibilityState !== 'visible') return
     await supabase.rpc('mark_messages_seen', { p_conversation_id: conversationId })
+    const msgs = messagesRef.current
+    const last = msgs[msgs.length - 1]
+    if (last?.id && last.id.length > 20) lastSeenMessageId.current = last.id
     onActivity()
   }, [conversationId, onActivity, user])
 
@@ -350,14 +397,14 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
           reply_to_id: replyToId,
           client_id: clientId,
         })
-        .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id, client_id')
+        .select(MESSAGE_SELECT)
         .single()
 
       if (insertErr || !created) {
         // Idempotent retry after partial success / multi-tab race
         const { data: existing } = await supabase
           .from('messages')
-          .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id, client_id')
+          .select(MESSAGE_SELECT)
           .eq('conversation_id', conversationId)
           .eq('client_id', clientId)
           .maybeSingle()
@@ -543,7 +590,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
 
       const { data: rows, error: err } = await supabase
         .from('messages')
-        .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id, client_id')
+        .select(MESSAGE_SELECT)
         .eq('conversation_id', conversationId)
         .order('created_at', { ascending: true })
         .limit(300)
@@ -582,7 +629,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
 
       const { data: rows, error: err } = await supabase
         .from('messages')
-        .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id, client_id')
+        .select(MESSAGE_SELECT)
         .eq('conversation_id', conversationId)
         .order('created_at', { ascending: true })
         .limit(300)
@@ -594,6 +641,13 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         }
         return
       }
+
+      const { data: conv } = await supabase
+        .from('conversations')
+        .select('pinned_message_id')
+        .eq('id', conversationId)
+        .maybeSingle()
+      if (!cancelled) setPinnedMessageId(conv?.pinned_message_id ?? null)
 
       const enriched = await enrichMessages((rows as Message[]) ?? [])
       const pendingLocal = outboxToLocalMessages(conversationId, user!.id)
@@ -615,13 +669,119 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   useEffect(() => {
     if (!stickToBottomRef.current) return
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages.length, peerTyping, waitingForPeer])
+  }, [messages.length, peerTyping, peerRecording, waitingForPeer])
+
+  useEffect(() => {
+    if (!normalizedSearch) return
+    const match = messagesRef.current.find(
+      (m) => m.body && m.body.toLowerCase().includes(normalizedSearch) && !m.deleted_at,
+    )
+    if (match) scrollToMessage(match.id)
+  }, [normalizedSearch])
 
   function onScrollerScroll() {
     const el = scrollerRef.current
     if (!el) return
-    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96
+    const stuck = el.scrollHeight - el.scrollTop - el.clientHeight < 96
+    stickToBottomRef.current = stuck
+    setStuckToBottom(stuck)
+    if (stuck) setUnreadDividerId(null)
   }
+
+  function scrollToBottom() {
+    stickToBottomRef.current = true
+    setStuckToBottom(true)
+    setUnreadDividerId(null)
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }
+
+  function scrollToMessage(id: string) {
+    document.getElementById(`msg-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+
+  function clearLongPress() {
+    if (longPressTimer.current) {
+      window.clearTimeout(longPressTimer.current)
+      longPressTimer.current = null
+    }
+    longPressMessageId.current = null
+  }
+
+  function startLongPress(message: Message) {
+    if (!message.id || message.id.length < 20) return
+    clearLongPress()
+    longPressMessageId.current = message.id
+    longPressTimer.current = window.setTimeout(() => {
+      setMenuFor(null)
+      setActionSheetMessage(message)
+      clearLongPress()
+    }, 400)
+  }
+
+  async function copyMessageBody(body: string | null) {
+    if (!body) return
+    try {
+      await navigator.clipboard.writeText(body)
+    } catch {
+      window.prompt('Copy message', body)
+    }
+    setActionSheetMessage(null)
+  }
+
+  async function deleteMessageForEveryone(messageId: string) {
+    const { error: err } = await supabase.rpc('delete_message', { p_message_id: messageId })
+    if (err) setError(err.message)
+    setActionSheetMessage(null)
+  }
+
+  async function editMessage(body: string) {
+    if (!editing) return
+    const { error: err } = await supabase.rpc('edit_message', {
+      p_message_id: editing.id,
+      p_body: body,
+    })
+    if (err) {
+      setError(err.message)
+      return
+    }
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === editing.id ? { ...m, body, edited_at: new Date().toISOString() } : m,
+      ),
+    )
+    setEditing(null)
+  }
+
+  async function pinMessage(messageId: string) {
+    const { error: err } = await supabase.rpc('pin_message', {
+      p_conversation_id: conversationId,
+      p_message_id: messageId,
+    })
+    if (err) setError(err.message)
+    else setPinnedMessageId(messageId)
+    setActionSheetMessage(null)
+  }
+
+  async function unpinMessage() {
+    const { error: err } = await supabase.rpc('pin_message', {
+      p_conversation_id: conversationId,
+      p_message_id: null,
+    })
+    if (err) setError(err.message)
+    else setPinnedMessageId(null)
+    setActionSheetMessage(null)
+  }
+
+  const handleComposerSend = useCallback(
+    async (body: string, file: File | null, replyToId: string | null) => {
+      if (editing) {
+        if (!file) await editMessage(body)
+        return
+      }
+      await queueOrSend(body, file, replyToId)
+    },
+    [editing, queueOrSend],
+  )
 
   useEffect(() => {
     if (!user) return
@@ -647,7 +807,40 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
     }
 
     const onVis = () => {
+      if (document.visibilityState === 'hidden') {
+        lastHiddenAt.current = new Date().toISOString()
+        return
+      }
       if (document.visibilityState === 'visible') {
+        const msgs = messagesRef.current
+        const afterId = lastSeenMessageId.current
+        let dividerId: string | null = null
+        if (afterId) {
+          const afterIdx = msgs.findIndex((m) => m.id === afterId)
+          for (let i = afterIdx + 1; i < msgs.length; i++) {
+            const m = msgs[i]
+            if (m.sender_id !== user!.id && !m.deleted_at) {
+              dividerId = m.id
+              break
+            }
+          }
+        } else if (lastHiddenAt.current) {
+          for (const m of msgs) {
+            if (
+              m.sender_id !== user!.id &&
+              !m.deleted_at &&
+              m.created_at > lastHiddenAt.current
+            ) {
+              dividerId = m.id
+              break
+            }
+          }
+        }
+        if (dividerId) {
+          setUnreadDividerId(dividerId)
+          if (unreadDividerTimer.current) window.clearTimeout(unreadDividerTimer.current)
+          unreadDividerTimer.current = window.setTimeout(() => setUnreadDividerId(null), 30_000)
+        }
         setHiddenUnread(0)
         document.title = baseTitle.current
         void recover(true)
@@ -784,12 +977,32 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
           noteEvent()
           const msg = payload.new as Message
           setMessages((prev) =>
-            prev.map((m) =>
-              m.id === msg.id
-                ? { ...m, delivered_at: msg.delivered_at, seen_at: msg.seen_at, body: msg.body }
-                : m,
-            ),
+            prev.map((m) => {
+              if (m.id !== msg.id) return m
+              const deleted = Boolean(msg.deleted_at)
+              return {
+                ...m,
+                delivered_at: msg.delivered_at,
+                seen_at: msg.seen_at,
+                body: msg.body,
+                edited_at: msg.edited_at,
+                deleted_at: msg.deleted_at,
+                ...(deleted ? { attachments: [], reactions: [] } : {}),
+              }
+            }),
           )
+          if (msg.deleted_at) {
+            setPinnedMessageId((prev) => (prev === msg.id ? null : prev))
+          }
+        },
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'conversations', filter: `id=eq.${conversationId}` },
+        (payload) => {
+          noteEvent()
+          const row = payload.new as { pinned_message_id?: string | null }
+          setPinnedMessageId(row.pinned_message_id ?? null)
         },
       )
       .on(
@@ -831,7 +1044,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
           void (async () => {
             const { data: rows } = await supabase
               .from('messages')
-              .select('id, conversation_id, sender_id, body, created_at, delivered_at, seen_at, reply_to_id, client_id')
+              .select(MESSAGE_SELECT)
               .eq('conversation_id', conversationId)
               .order('created_at', { ascending: true })
             const enriched = await enrichMessages((rows as Message[]) ?? [])
@@ -852,10 +1065,23 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
       )
       .on('presence', { event: 'sync' }, () => {
         noteEvent()
-        const state = channel.presenceState<{ typing?: boolean }>()
-        const othersPresent = Object.entries(state).filter(([key]) => key !== user.id)
+        const state = channel.presenceState<PresencePayload>()
+        const byUser = new Map<string, PresencePayload>()
+        for (const [key, metas] of Object.entries(state)) {
+          if (key === user.id) continue
+          const merged: PresencePayload = {}
+          for (const m of metas) {
+            if (m.typing) merged.typing = true
+            if (m.recording) merged.recording = true
+            if (m.online_at) merged.online_at = m.online_at
+          }
+          byUser.set(key, merged)
+        }
+        setPresenceByUser(byUser)
+        const othersPresent = [...byUser.keys()]
         setPeerOnline(othersPresent.length > 0)
-        setPeerTyping(othersPresent.some(([, metas]) => metas.some((m) => m.typing)))
+        setPeerTyping([...byUser.values()].some((m) => m.typing))
+        setPeerRecording([...byUser.values()].some((m) => m.recording))
       })
       .subscribe(async (status) => {
         if (cancelled) return
@@ -865,7 +1091,11 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
           lastEventAt.current = Date.now()
           setSyncState('live')
           try {
-            await channel.track({ typing: false, online_at: new Date().toISOString() })
+            await channel.track({
+              typing: presenceRef.current.typing ?? false,
+              recording: presenceRef.current.recording ?? false,
+              online_at: new Date().toISOString(),
+            })
           } catch {
             /* ignore */
           }
@@ -912,15 +1142,29 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
     user,
   ])
 
-  async function setTyping(typing: boolean) {
+  async function trackPresence(partial: Partial<PresencePayload>) {
     const channel = channelRef.current
     if (!channel) return
-    await channel.track({ typing, online_at: new Date().toISOString() })
+    presenceRef.current = { ...presenceRef.current, ...partial }
+    await channel.track({
+      typing: presenceRef.current.typing ?? false,
+      recording: presenceRef.current.recording ?? false,
+      online_at: new Date().toISOString(),
+    })
+  }
+
+  async function setTyping(typing: boolean) {
+    await trackPresence({ typing })
+  }
+
+  async function setRecording(recording: boolean) {
+    await trackPresence({ recording })
   }
 
   async function toggleReaction(messageId: string, emoji: string) {
     await supabase.rpc('toggle_reaction', { p_message_id: messageId, p_emoji: emoji })
     setMenuFor(null)
+    setActionSheetMessage(null)
     const { data } = await supabase
       .from('reactions')
       .select('message_id, user_id, emoji')
@@ -971,7 +1215,12 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         <button type="button" className="btn ghost back" onClick={onBack} title="Leave room">
           Leave
         </button>
-        <div className="chat-header-main">
+        <button
+          type="button"
+          className="chat-header-main chat-header-tap"
+          onClick={() => setPeersPanelOpen((o) => !o)}
+          title="Who's online"
+        >
           <strong>{title}</strong>
           <p className="muted status-line">
             {!online
@@ -982,19 +1231,21 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
                   ? 'Syncing…'
                   : waitingForPeer
                     ? `Only you · ${peerCount}/${maxParticipants}`
-                    : peerTyping
-                      ? 'typing…'
-                      : peerOnline
-                        ? isGroup
-                          ? `online · ${peerCount}/${maxParticipants}`
-                          : 'online'
-                        : other
-                          ? 'last seen recently'
-                          : isGroup
-                            ? `${peerCount}/${maxParticipants}`
-                            : ' '}
+                    : peerRecording
+                      ? 'Recording…'
+                      : peerTyping
+                        ? 'typing…'
+                        : peerOnline
+                          ? isGroup
+                            ? `online · ${peerCount}/${maxParticipants}`
+                            : 'online'
+                          : other
+                            ? 'last seen recently'
+                            : isGroup
+                              ? `${peerCount}/${maxParticipants}`
+                              : ' '}
           </p>
-        </div>
+        </button>
         <div className="header-actions">
           <button
             type="button"
@@ -1041,6 +1292,17 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
                     role="menuitem"
                     onClick={() => {
                       setHeaderMenuOpen(false)
+                      setSearchOpen((o) => !o)
+                      if (searchOpen) setSearchQuery('')
+                    }}
+                  >
+                    {searchOpen ? 'Close search' : 'Search'}
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setHeaderMenuOpen(false)
                       void clearChat()
                     }}
                   >
@@ -1063,7 +1325,94 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         </div>
       </header>
 
+      {searchOpen && (
+        <div className="chat-search-bar">
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search messages"
+            autoFocus
+          />
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={() => {
+              setSearchOpen(false)
+              setSearchQuery('')
+            }}
+          >
+            Close
+          </button>
+        </div>
+      )}
+
+      {peersPanelOpen && (
+        <>
+          <button
+            type="button"
+            className="header-menu-backdrop"
+            aria-label="Close peers panel"
+            onClick={() => setPeersPanelOpen(false)}
+          />
+          <div className="peers-panel" role="dialog" aria-label="Participants">
+            <p className="sheet-title">In this room</p>
+            <ul>
+              {others.map((p) => (
+                <li key={p.id}>
+                  <span>{p.display_name}</span>
+                  <span className={presenceByUser.has(p.id) ? 'peer-online' : 'peer-offline'}>
+                    {presenceByUser.has(p.id) ? 'online' : 'offline'}
+                  </span>
+                </li>
+              ))}
+              {others.length === 0 && other && (
+                <li>
+                  <span>{other.display_name}</span>
+                  <span className={presenceByUser.has(other.id) ? 'peer-online' : 'peer-offline'}>
+                    {presenceByUser.has(other.id) ? 'online' : 'offline'}
+                  </span>
+                </li>
+              )}
+              {others.length === 0 && !other && <li className="muted">No peers yet</li>}
+            </ul>
+          </div>
+        </>
+      )}
+
       <div className="message-scroller" ref={scrollerRef} onScroll={onScrollerScroll}>
+        {pinnedMessage && (
+          <button
+            type="button"
+            className="pin-banner"
+            onClick={() => scrollToMessage(pinnedMessage.id)}
+          >
+            <span className="pin-banner-text">
+              Pinned ·{' '}
+              {pinnedMessage.deleted_at
+                ? 'Deleted message'
+                : (pinnedMessage.body || 'Attachment').slice(0, 80)}
+            </span>
+            <span
+              className="pin-banner-close"
+              role="button"
+              tabIndex={0}
+              onClick={(e) => {
+                e.stopPropagation()
+                void unpinMessage()
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  void unpinMessage()
+                }
+              }}
+            >
+              ×
+            </span>
+          </button>
+        )}
         {loading && <p className="muted pad">Loading messages…</p>}
         {error && <p className="error pad">{error}</p>}
 
@@ -1090,101 +1439,138 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         {!loading &&
           messages.map((m) => {
             const mine = m.sender_id === user?.id
+            const deleted = Boolean(m.deleted_at)
             const audio = m.attachments?.find((a) => isAudio(a.mime_type))
             const showBody =
-              m.body && !(audio && (m.body === 'Voice note' || m.body === audio.file_name))
+              !deleted &&
+              m.body &&
+              !(audio && (m.body === 'Voice note' || m.body === audio.file_name))
             const grouped = new Map<string, number>()
             for (const r of m.reactions ?? []) grouped.set(r.emoji, (grouped.get(r.emoji) ?? 0) + 1)
             const canAct =
+              !deleted &&
               m.localStatus !== 'pending' &&
               m.localStatus !== 'uploading' &&
               m.localStatus !== 'failed' &&
               !(m.clientId && m.id === m.clientId)
             const status = receiptLabel(m)
+            const matchesSearch =
+              !normalizedSearch || (m.body?.toLowerCase().includes(normalizedSearch) ?? false)
+            const dimmed = Boolean(normalizedSearch) && !matchesSearch
 
             return (
-              <div key={m.clientId ?? m.id} className={`bubble-row ${mine ? 'mine' : 'theirs'}`}>
-                <div className={`bubble ${mine ? 'mine' : 'theirs'} ${m.localStatus === 'failed' ? 'failed' : ''}`}>
-                  {!mine && isGroup && (
-                    <p className="sender-name">{nameById.get(m.sender_id) ?? 'Member'}</p>
-                  )}
-                  {m.reply_preview && (
-                    <div className="reply-quote">{(m.reply_preview.body || 'Attachment').slice(0, 80)}</div>
-                  )}
-                  {showBody && <p>{m.body}</p>}
-                  {m.attachments?.map((a) => (
-                    <div key={a.id} className="attachment">
-                      {isImage(a.mime_type) && a.signed_url ? (
-                        <button
-                          type="button"
-                          className="image-thumb-btn"
-                          onClick={() => setLightbox({ src: a.signed_url!, alt: a.file_name })}
-                        >
-                          <img src={a.signed_url} alt={a.file_name} />
-                        </button>
-                      ) : isAudio(a.mime_type) && a.signed_url ? (
-                        <audio className="voice-player" controls preload="metadata" src={a.signed_url} />
-                      ) : a.signed_url ? (
-                        <a href={a.signed_url} target="_blank" rel="noreferrer" className="file-link">
-                          {a.file_name} ({formatBytes(a.size_bytes)})
-                        </a>
-                      ) : (
-                        <span className="muted">{a.file_name}</span>
+              <div key={m.clientId ?? m.id}>
+                {unreadDividerId === m.id && (
+                  <div className="unread-divider">
+                    <span>New messages</span>
+                  </div>
+                )}
+                <div
+                  id={`msg-${m.id}`}
+                  className={`bubble-row ${mine ? 'mine' : 'theirs'}${dimmed ? ' search-dimmed' : ''}`}
+                >
+                  <div
+                    className={`bubble ${mine ? 'mine' : 'theirs'} ${m.localStatus === 'failed' ? 'failed' : ''}`}
+                    onPointerDown={() => canAct && startLongPress(m)}
+                    onPointerUp={clearLongPress}
+                    onPointerCancel={clearLongPress}
+                    onPointerLeave={clearLongPress}
+                  >
+                    {!mine && isGroup && (
+                      <p className="sender-name">{nameById.get(m.sender_id) ?? 'Member'}</p>
+                    )}
+                    {m.reply_preview && !deleted && (
+                      <div className="reply-quote">{(m.reply_preview.body || 'Attachment').slice(0, 80)}</div>
+                    )}
+                    {deleted ? (
+                      <p className="deleted-msg">
+                        <em>This message was deleted</em>
+                      </p>
+                    ) : (
+                      showBody && (
+                        <p>
+                          {normalizedSearch && m.body
+                            ? highlightText(m.body, searchQuery.trim())
+                            : m.body}
+                        </p>
+                      )
+                    )}
+                    {!deleted &&
+                      m.attachments?.map((a) => (
+                        <div key={a.id} className="attachment">
+                          {isImage(a.mime_type) && a.signed_url ? (
+                            <button
+                              type="button"
+                              className="image-thumb-btn"
+                              onClick={() => setLightbox({ src: a.signed_url!, alt: a.file_name })}
+                            >
+                              <img src={a.signed_url} alt={a.file_name} />
+                            </button>
+                          ) : isAudio(a.mime_type) && a.signed_url ? (
+                            <audio className="voice-player" controls preload="metadata" src={a.signed_url} />
+                          ) : a.signed_url ? (
+                            <a href={a.signed_url} target="_blank" rel="noreferrer" className="file-link">
+                              {a.file_name} ({formatBytes(a.size_bytes)})
+                            </a>
+                          ) : (
+                            <span className="muted">{a.file_name}</span>
+                          )}
+                        </div>
+                      ))}
+                    {(m.localStatus === 'uploading' || m.localStatus === 'pending') && (
+                      <div className="upload-bar">
+                        <span style={{ width: `${m.localProgress ?? 20}%` }} />
+                      </div>
+                    )}
+                    {!deleted && grouped.size > 0 && (
+                      <div className="reaction-row">
+                        {[...grouped.entries()].map(([emoji, count]) => (
+                          <button
+                            key={emoji}
+                            type="button"
+                            className="reaction-pill"
+                            disabled={!canAct}
+                            onClick={() => void toggleReaction(m.id, emoji)}
+                          >
+                            {emoji} {count > 1 ? count : ''}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <footer>
+                      {canAct && (
+                        <>
+                          <button type="button" className="msg-action" onClick={() => setReplyTo(m)}>
+                            Reply
+                          </button>
+                          <button
+                            type="button"
+                            className="msg-action"
+                            onClick={() => setMenuFor(menuFor === m.id ? null : m.id)}
+                          >
+                            React
+                          </button>
+                        </>
                       )}
-                    </div>
-                  ))}
-                  {(m.localStatus === 'uploading' || m.localStatus === 'pending') && (
-                    <div className="upload-bar">
-                      <span style={{ width: `${m.localProgress ?? 20}%` }} />
-                    </div>
-                  )}
-                  {grouped.size > 0 && (
-                    <div className="reaction-row">
-                      {[...grouped.entries()].map(([emoji, count]) => (
-                        <button
-                          key={emoji}
-                          type="button"
-                          className="reaction-pill"
-                          disabled={!canAct}
-                          onClick={() => void toggleReaction(m.id, emoji)}
-                        >
-                          {emoji} {count > 1 ? count : ''}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  <footer>
-                    {canAct && (
-                      <>
-                        <button type="button" className="msg-action" onClick={() => setReplyTo(m)}>
-                          Reply
-                        </button>
-                        <button
-                          type="button"
-                          className="msg-action"
-                          onClick={() => setMenuFor(menuFor === m.id ? null : m.id)}
-                        >
-                          React
-                        </button>
-                      </>
+                      <time>{formatTime(m.created_at)}</time>
+                      {m.edited_at && !deleted && <span className="edited-label">edited</span>}
+                      {mine && (
+                        <span className={`ticks ${m.seen_at || (peerLastRead && peerLastRead >= m.created_at) ? 'seen' : ''}`}>
+                          {ticksFor(m)}
+                        </span>
+                      )}
+                    </footer>
+                    {status && <p className="receipt-label">{status}</p>}
+                    {menuFor === m.id && canAct && (
+                      <div className="react-menu">
+                        {REACTION_SET.map((emoji) => (
+                          <button key={emoji} type="button" onClick={() => void toggleReaction(m.id, emoji)}>
+                            {emoji}
+                          </button>
+                        ))}
+                      </div>
                     )}
-                    <time>{formatTime(m.created_at)}</time>
-                    {mine && (
-                      <span className={`ticks ${m.seen_at || (peerLastRead && peerLastRead >= m.created_at) ? 'seen' : ''}`}>
-                        {ticksFor(m)}
-                      </span>
-                    )}
-                  </footer>
-                  {status && <p className="receipt-label">{status}</p>}
-                  {menuFor === m.id && canAct && (
-                    <div className="react-menu">
-                      {REACTION_SET.map((emoji) => (
-                        <button key={emoji} type="button" onClick={() => void toggleReaction(m.id, emoji)}>
-                          {emoji}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  </div>
                 </div>
               </div>
             )
@@ -1192,14 +1578,48 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         <div ref={bottomRef} />
       </div>
 
+      {!stuckToBottom && (
+        <button type="button" className="jump-fab" onClick={scrollToBottom} title="Jump to latest">
+          ↓
+        </button>
+      )}
+
       <Composer
         replyTo={replyTo}
+        editing={editing}
         onCancelReply={() => setReplyTo(null)}
-        onSend={(body, file, replyId) => queueOrSend(body, file, replyId)}
+        onCancelEdit={() => setEditing(null)}
+        onSend={handleComposerSend}
         onTyping={(t) => {
           void setTyping(t)
         }}
+        onRecording={(r) => {
+          void setRecording(r)
+        }}
       />
+
+      {actionSheetMessage && (
+        <MessageActionSheet
+          message={actionSheetMessage}
+          mine={actionSheetMessage.sender_id === user?.id}
+          isPinned={pinnedMessageId === actionSheetMessage.id}
+          onClose={() => setActionSheetMessage(null)}
+          onReply={() => {
+            setReplyTo(actionSheetMessage)
+            setActionSheetMessage(null)
+          }}
+          onReact={(emoji) => void toggleReaction(actionSheetMessage.id, emoji)}
+          onCopy={() => void copyMessageBody(actionSheetMessage.body)}
+          onEdit={() => {
+            setEditing(actionSheetMessage)
+            setReplyTo(null)
+            setActionSheetMessage(null)
+          }}
+          onDelete={() => void deleteMessageForEveryone(actionSheetMessage.id)}
+          onPin={() => void pinMessage(actionSheetMessage.id)}
+          onUnpin={() => void unpinMessage()}
+        />
+      )}
 
       {lightbox && (
         <ImageLightbox src={lightbox.src} alt={lightbox.alt} onClose={() => setLightbox(null)} />
