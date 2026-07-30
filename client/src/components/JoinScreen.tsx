@@ -45,8 +45,13 @@ export function JoinScreen() {
     try {
       localStorage.setItem('pulse_display_name', trimmedName)
       const err = await joinWithCode(trimmedCode, trimmedName)
-      if (err) setError(err)
-      else {
+      if (err) {
+        if (/invalid api key/i.test(err)) {
+          setError('App cache is stale. Close all Pulse tabs, reopen the site, then try again.')
+        } else {
+          setError(err)
+        }
+      } else {
         const url = new URL(window.location.href)
         url.searchParams.delete('code')
         window.history.replaceState({}, '', url.pathname + url.search)

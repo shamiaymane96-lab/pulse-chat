@@ -44,17 +44,13 @@ export default defineConfig({
         ],
       },
       workbox: {
+        // Bump cache names so clients drop the bad-key deploy (Jul 2026)
+        cacheId: 'pulse-v3',
+        cleanupOutdatedCaches: true,
+        clientsClaim: true,
+        skipWaiting: true,
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
-        runtimeCaching: [
-          {
-            urlPattern: /^https:\/\/.*\.supabase\.co\/.*/i,
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'supabase-api',
-              expiration: { maxEntries: 64, maxAgeSeconds: 60 * 60 },
-            },
-          },
-        ],
+        // Do not cache Supabase API — auth keys/headers must always hit the network
       },
     }),
   ],
