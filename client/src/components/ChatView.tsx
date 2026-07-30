@@ -17,6 +17,7 @@ import { MessageActionSheet } from './MessageActionSheet'
 import { hardRefreshApp } from '../lib/hardRefresh'
 import { roomLink, syncCodeInUrl } from '../lib/roomLink'
 import { isAllowedChatFile, isSafeImageMime } from '../lib/fileAllowlist'
+import { signedUrlsFor } from '../lib/signedUrls'
 
 type Props = {
   conversationId: string
@@ -158,7 +159,10 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   const [hiddenUnread, setHiddenUnread] = useState(0)
   const [online, setOnline] = useState(navigator.onLine)
   const [rtEpoch, setRtEpoch] = useState(0)
-  const [syncState, setSyncState] = useState<'live' | 'reconnecting' | 'polling'>('reconnecting')
+  // Value is unread since the header sync indicator was removed; the setter is
+  // still driven by the channel lifecycle below. Restore the binding if the
+  // indicator comes back.
+  const [, setSyncState] = useState<'live' | 'reconnecting' | 'polling'>('reconnecting')
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollerRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
@@ -178,6 +182,9 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   const longPressTimer = useRef<number | null>(null)
   const longPressMessageId = useRef<string | null>(null)
   const unreadDividerTimer = useRef<number | null>(null)
+  // messages no longer emits usable DELETE events (see migration 010) — the room
+  // signals a wipe by bumping conversations.messages_cleared_at instead.
+  const clearedAtRef = useRef<string | null>(null)
 
   useEffect(() => {
     messagesRef.current = messages
@@ -253,10 +260,10 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
     ])
 
     const filesByMsg = new Map<string, Attachment[]>()
+    const signedByPath = await signedUrlsFor((files ?? []).map((f) => f.storage_path))
     for (const f of files ?? []) {
-      const { data: signed } = await supabase.storage.from('chat-files').createSignedUrl(f.storage_path, 3600)
       const list = filesByMsg.get(f.message_id) ?? []
-      list.push({ ...f, signed_url: signed?.signedUrl })
+      list.push({ ...f, signed_url: signedByPath.get(f.storage_path) })
       filesByMsg.set(f.message_id, list)
     }
 
@@ -290,13 +297,18 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         .from('participants')
         .select('user_id, last_read_at, profiles(id, username, display_name, avatar_url, last_seen)')
         .eq('conversation_id', conversationId),
-      supabase.from('conversations').select('max_participants, pinned_message_id').eq('id', conversationId).maybeSingle(),
+      supabase
+        .from('conversations')
+        .select('max_participants, pinned_message_id, messages_cleared_at')
+        .eq('id', conversationId)
+        .maybeSingle(),
     ])
 
     const rows = parts ?? []
     setPeerCount(rows.length)
     if (conv?.max_participants) setMaxParticipants(conv.max_participants)
     setPinnedMessageId(conv?.pinned_message_id ?? null)
+    clearedAtRef.current = conv?.messages_cleared_at ?? null
 
     const peerRows = rows.filter((p) => p.user_id !== user.id)
     const peerProfiles = peerRows
@@ -1027,8 +1039,22 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         { event: 'UPDATE', schema: 'public', table: 'conversations', filter: `id=eq.${conversationId}` },
         (payload) => {
           noteEvent()
-          const row = payload.new as { pinned_message_id?: string | null }
+          const row = payload.new as {
+            pinned_message_id?: string | null
+            messages_cleared_at?: string | null
+          }
           setPinnedMessageId(row.pinned_message_id ?? null)
+
+          const cleared = row.messages_cleared_at ?? null
+          if (cleared && cleared !== clearedAtRef.current) {
+            clearedAtRef.current = cleared
+            clearOutboxForConversation(conversationId)
+            setMessages((prev) => {
+              revokeBlobUrlsFromMessages(prev)
+              return []
+            })
+            void reloadFromServerRef.current()
+          }
         },
       )
       .on(
@@ -1041,7 +1067,12 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
       )
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'reactions' },
+        {
+          event: '*',
+          schema: 'public',
+          table: 'reactions',
+          filter: `conversation_id=eq.${conversationId}`,
+        },
         () => {
           noteEvent()
           void (async () => {
@@ -1062,33 +1093,10 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
           })()
         },
       )
-      .on(
-        'postgres_changes',
-        { event: 'DELETE', schema: 'public', table: 'messages', filter: `conversation_id=eq.${conversationId}` },
-        () => {
-          noteEvent()
-          void (async () => {
-            const { data: rows } = await supabase
-              .from('messages')
-              .select(MESSAGE_SELECT)
-              .eq('conversation_id', conversationId)
-              .order('created_at', { ascending: true })
-            const enriched = await enrichMessagesRef.current((rows as Message[]) ?? [])
-            setMessages((prev) => {
-              const hadServer = prev.some((m) => !m.localStatus || m.localStatus === 'sent')
-              if (hadServer && enriched.length === 0) {
-                clearOutboxForConversation(conversationId)
-                return []
-              }
-              const liveLocals = prev.filter(
-                (m) => m.localStatus === 'pending' || m.localStatus === 'failed' || m.localStatus === 'uploading',
-              )
-              const fromOutbox = outboxToLocalMessages(conversationId, userId)
-              return mergeServerWithLocals(enriched, [...liveLocals, ...fromOutbox])
-            })
-          })()
-        },
-      )
+      // No DELETE subscription: migration 010 reverted messages to REPLICA
+      // IDENTITY DEFAULT so deleted bodies stop being broadcast to every
+      // authenticated client. Wipes arrive via conversations.messages_cleared_at
+      // above; one-off deletes are soft (an UPDATE) and land in that handler.
       .on('presence', { event: 'sync' }, () => {
         noteEvent()
         const state = channel.presenceState<PresencePayload>()
@@ -1243,27 +1251,21 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
         >
           <strong>{title}</strong>
           <p className="muted status-line">
-            {!online
-              ? 'Offline · queued sends'
-              : syncState === 'reconnecting'
-                ? 'Reconnecting…'
-                : syncState === 'polling'
-                  ? 'Syncing…'
-                  : waitingForPeer
-                    ? `Only you · ${peerCount}/${maxParticipants}`
-                    : peerRecording
-                      ? 'Recording…'
-                      : peerTyping
-                        ? 'typing…'
-                        : peerOnline
-                          ? isGroup
-                            ? `online · ${peerCount}/${maxParticipants}`
-                            : 'online'
-                          : other
-                            ? 'last seen recently'
-                            : isGroup
-                              ? `${peerCount}/${maxParticipants}`
-                              : ' '}
+            {waitingForPeer
+              ? `Only you · ${peerCount}/${maxParticipants}`
+              : peerRecording
+                ? 'Recording…'
+                : peerTyping
+                  ? 'typing…'
+                  : peerOnline
+                    ? isGroup
+                      ? `online · ${peerCount}/${maxParticipants}`
+                      : 'online'
+                    : other
+                      ? 'last seen recently'
+                      : isGroup
+                        ? `${peerCount}/${maxParticipants}`
+                        : ' '}
           </p>
         </button>
         <div className="header-actions">
