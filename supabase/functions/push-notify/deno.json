@@ -1,4 +1,0 @@
-{
-  "name": "push-notify",
-  "entrypoints": ["./index.ts"]
-}

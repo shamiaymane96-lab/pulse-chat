@@ -13,7 +13,11 @@ function read(): OutboxItem[] {
 }
 
 function write(items: OutboxItem[]) {
-  localStorage.setItem(KEY, JSON.stringify(items))
+  try {
+    localStorage.setItem(KEY, JSON.stringify(items))
+  } catch {
+    throw new Error('Outbox full — file too large to queue offline. Stay online and retry.')
+  }
 }
 
 export function listOutbox(conversationId?: string) {
@@ -22,6 +26,10 @@ export function listOutbox(conversationId?: string) {
 }
 
 export function enqueueOutbox(item: OutboxItem) {
+  // Skip huge payloads — localStorage cannot hold multi‑MB base64 reliably
+  if (item.fileBase64 && item.fileBase64.length > 1_500_000) {
+    throw new Error('File too large to queue offline. Stay online and send again.')
+  }
   const next = [...read().filter((i) => i.clientId !== item.clientId), item]
   write(next)
 }

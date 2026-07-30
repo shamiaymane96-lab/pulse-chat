@@ -31,9 +31,7 @@ function Shell() {
     }
   }, [])
 
-  const onActivity = useCallback(() => {
-    // reserved for future unread sync
-  }, [])
+  const onActivity = useCallback(() => {}, [])
 
   if (!isSupabaseConfigured) {
     return (

@@ -39,15 +39,6 @@ export type Message = {
   clientId?: string
 }
 
-export type ConversationPreview = {
-  id: string
-  is_group: boolean
-  title: string | null
-  other?: Profile
-  last_message?: Message | null
-  unread: number
-}
-
 export type OutboxItem = {
   clientId: string
   conversationId: string

@@ -187,7 +187,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const leave = useCallback(async () => {
     const roomId = localStorage.getItem(ROOM_KEY)
-    const code = localStorage.getItem(CODE_KEY)
     if (roomId) {
       const { error } = await supabase.rpc('leave_room', { p_conversation_id: roomId })
       if (error) {
@@ -199,8 +198,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem(CODE_KEY)
     setActiveRoomId(null)
     setActiveCode(null)
-    // Keep ?code= so Leave still lets you bookmark / rejoin the same room
-    if (code) syncCodeInUrl(code)
+    // Clear ?code= so Leave does not instantly auto-rejoin via JoinScreen
+    syncCodeInUrl(null)
+    // Keep anonymous session so rejoining later does not create a 3rd identity
   }, [])
 
   const setRoomCode = useCallback((code: string) => {

@@ -87,9 +87,13 @@ function outboxToLocalMessages(conversationId: string, senderId: string): Messag
 
 function mergeServerWithLocals(server: Message[], locals: Message[]) {
   const serverIds = new Set(server.map((m) => m.id))
+  const serverClientIds = new Set(server.map((m) => m.clientId).filter(Boolean) as string[])
   const kept = locals.filter((m) => {
     const id = m.clientId ?? m.id
-    return Boolean(m.localStatus) && m.localStatus !== 'sent' && !serverIds.has(id)
+    if (!m.localStatus || m.localStatus === 'sent') return false
+    if (serverIds.has(m.id) || serverIds.has(id)) return false
+    if (m.clientId && serverClientIds.has(m.clientId)) return false
+    return true
   })
   const unique = kept.filter(
     (m, i, arr) => arr.findIndex((x) => (x.clientId ?? x.id) === (m.clientId ?? m.id)) === i,
@@ -138,6 +142,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
   const reconnectAttempt = useRef(0)
   const syncAliveRef = useRef(false)
   const lastEventAt = useRef(Date.now())
+  const lastReconnectAt = useRef(0)
 
   useEffect(() => {
     messagesRef.current = messages
@@ -220,13 +225,18 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
 
     const replyMap = new Map((replies ?? []).map((r) => [r.id, r]))
 
-    return rows.map((msg) => ({
-      ...msg,
-      attachments: filesByMsg.get(msg.id) ?? [],
-      reactions: reactionsByMsg.get(msg.id) ?? [],
-      reply_preview: msg.reply_to_id ? replyMap.get(msg.reply_to_id) ?? null : null,
-      localStatus: 'sent' as const,
-    })) as Message[]
+    return rows.map((msg) => {
+      const raw = msg as Message & { client_id?: string | null }
+      const clientId = raw.clientId ?? raw.client_id ?? undefined
+      return {
+        ...msg,
+        clientId,
+        attachments: filesByMsg.get(msg.id) ?? [],
+        reactions: reactionsByMsg.get(msg.id) ?? [],
+        reply_preview: msg.reply_to_id ? replyMap.get(msg.reply_to_id) ?? null : null,
+        localStatus: 'sent' as const,
+      } satisfies Message
+    })
   }, [])
 
   const refreshParticipants = useCallback(async () => {
@@ -384,10 +394,11 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
             size_bytes: file.size,
             file_name: file.name,
           })
-          if (attErr) {
-            await supabase.from('messages').delete().eq('id', inserted.id)
-            throw new Error(attErr.message)
-          }
+        if (attErr) {
+          await supabase.from('messages').delete().eq('id', inserted.id)
+          await supabase.storage.from('chat-files').remove([path])
+          throw new Error(attErr.message)
+        }
         }
       }
 
@@ -465,16 +476,24 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
       try {
         await sendNow(body, file, replyToId, clientId)
       } catch (err) {
-        enqueueOutbox({
-          clientId,
-          conversationId,
-          body,
-          replyToId,
-          fileName: file?.name,
-          fileType: file?.type,
-          fileBase64: file ? await fileToBase64(file) : undefined,
-          createdAt: optimistic.created_at,
-        })
+        try {
+          enqueueOutbox({
+            clientId,
+            conversationId,
+            body,
+            replyToId,
+            fileName: file?.name,
+            fileType: file?.type,
+            fileBase64: file ? await fileToBase64(file) : undefined,
+            createdAt: optimistic.created_at,
+          })
+        } catch (queueErr) {
+          setMessages((prev) =>
+            prev.map((m) => (m.clientId === clientId ? { ...m, localStatus: 'failed', localProgress: 0 } : m)),
+          )
+          setError(queueErr instanceof Error ? queueErr.message : 'Could not queue message')
+          return
+        }
         setMessages((prev) =>
           prev.map((m) => (m.clientId === clientId ? { ...m, localStatus: 'failed', localProgress: 0 } : m)),
         )
@@ -652,16 +671,19 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
       if (document.visibilityState !== 'visible' || !navigator.onLine) return
       tick += 1
       const stale = Date.now() - lastEventAt.current > 25_000
-      if (!syncAliveRef.current || stale) {
+      if (!syncAliveRef.current) {
         setSyncState((s) => (s === 'live' ? 'polling' : s))
         void reloadFromServer().then((ok) => {
           if (ok) {
             void flushOutbox()
-            if (!syncAliveRef.current) setRtEpoch((n) => n + 1)
+            if (Date.now() - lastReconnectAt.current > 8_000) {
+              lastReconnectAt.current = Date.now()
+              setRtEpoch((n) => n + 1)
+            }
           }
         })
-      } else if (tick % 3 === 0) {
-        // Gentle catch-up while realtime looks healthy (~15s)
+      } else if (stale || tick % 3 === 0) {
+        // Catch-up without flipping UI to "Syncing…" while the socket is healthy
         void reloadFromServer()
       }
     }, 5000)
@@ -689,6 +711,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
 
     setSyncState('reconnecting')
     syncAliveRef.current = false
+    lastReconnectAt.current = Date.now()
 
     const channel = supabase.channel(topic, {
       config: { presence: { key: user.id } },
@@ -707,16 +730,35 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
           const msg = payload.new as Message & { client_id?: string | null }
           void (async () => {
             await new Promise((r) => window.setTimeout(r, 200))
-            if (msg.sender_id === user.id && msg.client_id) {
+            const clientId = msg.client_id ?? undefined
+            // Don't clobber an in-flight local upload with a bare server row
+            const local = messagesRef.current.find(
+              (m) => (clientId && m.clientId === clientId) || m.id === msg.id || m.id === clientId,
+            )
+            if (
+              msg.sender_id === user.id &&
+              local &&
+              (local.localStatus === 'uploading' || local.localStatus === 'pending')
+            ) {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.clientId === clientId || m.id === msg.id || m.id === clientId
+                    ? { ...m, id: msg.id, clientId: clientId ?? m.clientId }
+                    : m,
+                ),
+              )
+              return
+            }
+            if (msg.sender_id === user.id && clientId) {
               setMessages((prev) => {
-                const hasLocal = prev.some((m) => m.clientId === msg.client_id || m.id === msg.id)
+                const hasLocal = prev.some((m) => m.clientId === clientId || m.id === msg.id)
                 if (hasLocal) {
                   return prev.map((m) =>
-                    m.clientId === msg.client_id || m.id === msg.id
+                    m.clientId === clientId || m.id === msg.id
                       ? {
                           ...m,
                           id: msg.id,
-                          clientId: msg.client_id ?? m.clientId,
+                          clientId: clientId ?? m.clientId,
                           localStatus: m.localStatus === 'sent' ? 'sent' : m.localStatus,
                         }
                       : m,
@@ -726,7 +768,7 @@ export function ChatView({ conversationId, roomCode, onBack, onActivity }: Props
               })
             }
             const [enriched] = await enrichMessages([msg])
-            upsertMessage({ ...enriched, clientId: msg.client_id ?? undefined })
+            upsertMessage({ ...enriched, clientId })
             if (msg.sender_id === user.id) return
             await supabase.rpc('mark_message_delivered', { p_message_id: msg.id })
             if (document.visibilityState === 'hidden') setHiddenUnread((n) => n + 1)
