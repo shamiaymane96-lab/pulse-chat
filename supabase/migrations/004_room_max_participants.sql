@@ -118,3 +118,6 @@ end;
 $$;
 
 grant execute on function public.join_room_by_code(text, text, int) to authenticated, anon;
+
+-- Remove legacy 2-arg overload (hardcoded max 2) if present
+drop function if exists public.join_room_by_code(text, text);
